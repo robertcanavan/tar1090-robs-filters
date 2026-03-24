@@ -1,0 +1,684 @@
+/* routes-filter.css - Routes/Airports/Countries filter panel for tar1090 */
+
+#rf-panel {
+    position: fixed;
+    top: 60px;
+    right: 10px;
+    width: 400px;
+    max-height: calc(100vh - 80px);
+    background: var(--BGCOLOR1, #1a1a1a);
+    border: 1px solid var(--ACCENT, #00596b);
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    z-index: 9999;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+    font-family: inherit;
+    font-size: 13px;
+    color: #fff;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+.rf-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    background: var(--ACCENT, #00596b);
+    font-weight: bold;
+    font-size: 13px;
+    border-radius: 3px 3px 0 0;
+    cursor: move;
+    user-select: none;
+}
+
+.rf-close {
+    background: none;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 0 2px;
+    line-height: 1;
+    opacity: 0.8;
+}
+.rf-close:hover { opacity: 1; }
+
+/* ── Search ──────────────────────────────────────────────────────────────── */
+.rf-search {
+    margin: 8px 8px 4px 8px;
+    padding: 5px 8px;
+    background: var(--BGCOLOR2, #2a2a2a);
+    border: 1px solid #444;
+    border-radius: 3px;
+    color: #fff;
+    width: calc(100% - 16px);
+    box-sizing: border-box;
+    font-size: 12px;
+}
+.rf-search:focus { outline: none; border-color: var(--ACCENT, #00596b); }
+.rf-search::placeholder { color: #666; }
+
+/* ── Tabs ────────────────────────────────────────────────────────────────── */
+.rf-tabs {
+    display: flex;
+    border-bottom: 1px solid #333;
+    margin: 0 8px;
+    flex-wrap: wrap;
+}
+
+.rf-tab {
+    flex: 1;
+    text-align: center;
+    padding: 5px 2px;
+    cursor: pointer;
+    font-size: 10px;
+    border-bottom: 2px solid transparent;
+    color: #888;
+    user-select: none;
+    transition: color 0.1s;
+    min-width: 0;
+}
+.rf-tab:hover { color: #ccc; }
+.rf-tab-active {
+    color: #fff;
+    border-bottom-color: var(--ACCENT, #00596b);
+}
+
+/* ── Breadcrumb: active filter chips ────────────────────────────────────── */
+.rf-breadcrumb {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 6px 8px 2px 8px;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.rf-chip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px 3px 8px;
+    background: #1e3a3f;
+    border: 1px solid var(--ACCENT, #00596b);
+    border-radius: 12px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.1s;
+    max-width: 100%;
+}
+.rf-chip:hover { background: #264a50; }
+.rf-chip.rf-chip-active { background: var(--ACCENT, #00596b); }
+
+.rf-chip-label {
+    color: #8dd;
+    font-weight: bold;
+    font-size: 10px;
+    flex-shrink: 0;
+}
+.rf-chip-active .rf-chip-label { color: #cff; }
+
+.rf-chip-items {
+    color: #ddd;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rf-chip-x {
+    background: none;
+    border: none;
+    color: #aaa;
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 2px;
+    line-height: 1;
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+.rf-chip-x:hover { opacity: 1; color: #fff; }
+
+/* ── Direction toggle (airports + countries) ─────────────────────────────── */
+.rf-controls { padding: 6px 8px 2px 8px; min-height: 0; }
+
+.rf-direction {
+    display: flex;
+    gap: 4px;
+}
+
+.rf-dir-btn {
+    flex: 1;
+    padding: 4px 0;
+    font-size: 11px;
+    background: var(--BGCOLOR2, #2a2a2a);
+    border: 1px solid #444;
+    border-radius: 3px;
+    color: #888;
+    cursor: pointer;
+    transition: all 0.1s;
+}
+.rf-dir-btn:hover { color: #ccc; border-color: #666; }
+.rf-dir-btn.rf-dir-active {
+    background: var(--ACCENT, #00596b);
+    border-color: var(--ACCENT, #00596b);
+    color: #fff;
+}
+
+/* ── Aircraft category filter ────────────────────────────────────────────── */
+.rf-cat-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    padding: 2px 0;
+}
+
+.rf-cat-btn {
+    padding: 3px 7px;
+    font-size: 11px;
+    background: var(--BGCOLOR2, #2a2a2a);
+    border: 1px solid #444;
+    border-radius: 10px;
+    color: #888;
+    cursor: pointer;
+    transition: all 0.1s;
+    white-space: nowrap;
+}
+.rf-cat-btn:hover { color: #ccc; border-color: #666; }
+.rf-cat-btn.rf-cat-active {
+    background: var(--ACCENT, #00596b);
+    border-color: var(--ACCENT, #00596b);
+    color: #fff;
+}
+
+.rf-cat-select-all {
+    margin-top: 4px;
+    width: 100%;
+    padding: 4px;
+    font-size: 11px;
+    background: none;
+    border: 1px dashed #555;
+    border-radius: 3px;
+    color: #aaa;
+    cursor: pointer;
+    transition: all 0.1s;
+}
+.rf-cat-select-all:hover { border-color: var(--ACCENT, #00596b); color: #fff; }
+
+/* ── Country dropdown on Aircraft tab ────────────────────────────────────── */
+.rf-country-select {
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    padding: 4px 6px;
+    background: var(--BGCOLOR2, #2a2a2a);
+    border: 1px solid #444;
+    border-radius: 3px;
+    color: #ccc;
+    font-size: 12px;
+    cursor: pointer;
+}
+.rf-country-select:focus { outline: none; border-color: var(--ACCENT, #00596b); }
+
+/* ── Column headers ──────────────────────────────────────────────────────── */
+.rf-colheader { padding: 4px 8px 2px 8px; }
+
+.rf-colheader-row {
+    display: flex;
+    align-items: center;
+    font-size: 10px;
+    color: #555;
+    user-select: none;
+}
+
+.rf-col-sort {
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 2px;
+    transition: color 0.1s, background 0.1s;
+    white-space: nowrap;
+}
+.rf-col-sort:first-child { flex: 1; }
+.rf-col-sort:not(:first-child) {
+    min-width: 36px;
+    text-align: center;
+    flex-shrink: 0;
+}
+.rf-col-sort:hover { color: #aaa; background: rgba(255,255,255,0.05); }
+.rf-col-sort.rf-col-active { color: #ccc; }
+
+.rf-col-cat-hdr {
+    flex: 1;
+    font-size: 10px;
+    color: #555;
+    padding: 2px 4px;
+}
+
+/* ── List ────────────────────────────────────────────────────────────────── */
+.rf-list {
+    overflow-y: auto;
+    flex: 1;
+    padding: 4px 8px;
+    min-height: 80px;
+    max-height: 50vh;
+}
+.rf-list::-webkit-scrollbar { width: 5px; }
+.rf-list::-webkit-scrollbar-track { background: transparent; }
+.rf-list::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+
+/* ── Base item ───────────────────────────────────────────────────────────── */
+.rf-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 8px;
+    margin: 2px 0;
+    border-radius: 3px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    background: var(--BGCOLOR2, #222);
+    transition: border-color 0.1s;
+    user-select: none;
+    gap: 4px;
+}
+.rf-item:hover { border-color: var(--ACCENT, #00596b); }
+.rf-item-active {
+    background: var(--ACCENT, #00596b) !important;
+    border-color: transparent !important;
+}
+
+.rf-item-name {
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.rf-item-count {
+    font-size: 11px;
+    color: #aaa;
+    background: rgba(0, 0, 0, 0.35);
+    padding: 1px 6px;
+    border-radius: 10px;
+    min-width: 28px;
+    text-align: center;
+    flex-shrink: 0;
+}
+.rf-item-active .rf-item-count { color: #fff; background: rgba(0,0,0,0.25); }
+
+/* ── Multi-column items (airports + countries) ───────────────────────────── */
+/* Name takes remaining space; two count badges right-aligned */
+.rf-item-multi .rf-item-count {
+    min-width: 32px;
+}
+
+/* ── Gear / settings tab ─────────────────────────────────────────────────── */
+.rf-tab-gear { font-size: 14px; flex: 0 0 auto; padding: 5px 8px; }
+
+/* ── Settings panel ──────────────────────────────────────────────────────── */
+.rf-settings-content { padding: 12px 4px; }
+.rf-setting-row { margin-bottom: 12px; }
+.rf-setting-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #ddd;
+    cursor: pointer;
+    user-select: none;
+}
+.rf-setting-check { width: 14px; height: 14px; cursor: pointer; accent-color: var(--ACCENT, #00596b); flex-shrink: 0; }
+.rf-setting-desc { font-size: 11px; color: #666; margin-top: 4px; padding-left: 22px; line-height: 1.5; }
+.rf-setting-section-title { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.rf-setting-divider { border-top: 1px solid #2a2a2a; margin: 14px 0; }
+.rf-about { background: #1e1e1e; border-radius: 4px; padding: 10px 12px; }
+.rf-about-title { font-size: 13px; font-weight: bold; color: var(--ACCENT, #00596b); margin-bottom: 8px; }
+.rf-about-body { font-size: 11px; color: #aaa; line-height: 1.6; margin-bottom: 6px; }
+.rf-about-made { font-size: 11px; color: #555; font-style: italic; margin-top: 10px; border-top: 1px solid #2a2a2a; padding-top: 8px; }
+
+/* ── Aircraft items ──────────────────────────────────────────────────────── */
+/* Country flags column in aircraft rows */
+.rf-ac-country {
+    font-size: 13px;
+    flex-shrink: 0;
+    min-width: 52px;
+    text-align: center;
+    letter-spacing: 1px;
+    line-height: 1;
+}
+
+.rf-ac-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+    width: 22px;
+    text-align: center;
+    line-height: 1;
+}
+
+.rf-ac-cat {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.35);
+    flex-shrink: 0;
+    min-width: 64px;
+    text-align: center;
+    white-space: nowrap;
+}
+.rf-item-active .rf-ac-cat { background: rgba(0,0,0,0.25); }
+
+/* ── Flag emoji ──────────────────────────────────────────────────────────── */
+.rf-flag {
+    font-size: 13px;
+    flex-shrink: 0;
+    line-height: 1;
+    margin-right: 2px;
+}
+
+/* ── Route item with flags ───────────────────────────────────────────────── */
+.rf-item-route .rf-item-name {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-wrap: nowrap;
+    overflow: hidden;
+}
+.rf-route-sep {
+    color: #666;
+    padding: 0 2px;
+    flex-shrink: 0;
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+.rf-empty {
+    color: #666;
+    font-style: italic;
+    padding: 20px;
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+/* ── Footer ──────────────────────────────────────────────────────────────── */
+.rf-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    border-top: 1px solid #333;
+}
+
+.rf-status {
+    font-size: 11px;
+    color: #888;
+}
+
+.rf-clear {
+    background: none;
+    border: 1px solid #555;
+    color: #aaa;
+    padding: 3px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    transition: border-color 0.1s, color 0.1s;
+}
+.rf-clear:hover {
+    border-color: var(--ACCENT, #00596b);
+    color: #fff;
+}
+
+/* ── Alerts tab controls ─────────────────────────────────────────────────── */
+.rf-alerts-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+.rf-alerts-checks {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding-top: 2px;
+}
+.rf-alerts-live-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: #888;
+    cursor: pointer;
+    user-select: none;
+}
+.rf-alerts-mapfilter-label { color: #e8a87c; font-weight: 600; }
+
+/* ── Alerts list rows ────────────────────────────────────────────────────── */
+/* rf-al-item overrides rf-item for two-line name */
+.rf-al-item { align-items: center; }
+.rf-al-live { border-left: 2px solid #4caf50 !important; }
+.rf-al-live-cell { width: 12px; flex-shrink: 0; }
+.rf-al-live-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #4caf50;
+    box-shadow: 0 0 4px #4caf50;
+    flex-shrink: 0;
+}
+
+/* Name column: two-line (ICAO+reg / operator) */
+.rf-al-name {
+    display: flex;
+    flex-direction: column;
+    white-space: normal;
+    gap: 1px;
+    min-width: 0;
+}
+.rf-al-name-top { display: flex; align-items: baseline; gap: 5px; }
+.rf-al-icao     { font-size: 11px; font-weight: bold; color: #ddd; font-family: monospace; }
+.rf-al-reg      { font-size: 10px; color: #888; }
+.rf-al-op-small { font-size: 10px; color: #666; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Type and category badge columns */
+.rf-al-type-col {
+    font-size: 10px;
+    color: #888;
+    min-width: 52px;
+    max-width: 72px;
+    flex-shrink: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.rf-al-cat-col {
+    font-size: 10px;
+    color: var(--ACCENT, #00596b);
+    min-width: 56px;
+    max-width: 80px;
+    flex-shrink: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.rf-item-active .rf-al-type-col { color: rgba(255,255,255,0.6); }
+.rf-item-active .rf-al-cat-col  { color: rgba(255,255,255,0.8); }
+
+/* Info button -- same compact style */
+.rf-al-info-btn {
+    background: none;
+    border: 1px solid #444;
+    border-radius: 3px;
+    color: #666;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 1px 4px;
+    flex-shrink: 0;
+    line-height: 1.2;
+    transition: all 0.1s;
+}
+.rf-al-info-btn:hover { border-color: var(--ACCENT, #00596b); color: #fff; }
+.rf-item-active .rf-al-info-btn { border-color: rgba(255,255,255,0.3); color: rgba(255,255,255,0.7); }
+
+/* Column header spans */
+.rf-al-hdr      { gap: 4px; }
+.rf-al-hdr-live { width: 12px; flex-shrink: 0; }
+.rf-al-hdr-name { flex: 1; font-size: 11px; }
+.rf-al-hdr-type { min-width: 52px; max-width: 72px; flex-shrink: 0; font-size: 11px; }
+.rf-al-hdr-cat  { min-width: 56px; max-width: 80px; flex-shrink: 0; font-size: 11px; }
+.rf-al-hdr-info { width: 28px; flex-shrink: 0; }
+
+/* ── Detail card (pinned top of list when ℹ is open) ─────────────────────── */
+.rf-al-detail {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 4px;
+    margin-bottom: 6px;
+    padding: 0;
+    overflow: hidden;
+}
+.rf-al-detail-hdr {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    background: #222;
+    border-bottom: 1px solid #2a2a2a;
+    flex-wrap: wrap;
+}
+.rf-al-detail-body { padding: 6px 8px 2px 8px; }
+
+.rf-mi-icao  { font-family: monospace; font-size: 13px; font-weight: bold; color: #fff; }
+.rf-mi-reg   { font-size: 11px; color: #888; flex: 1; }
+.rf-mi-close {
+    background: none;
+    border: 1px solid #555;
+    border-radius: 3px;
+    color: #888;
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 7px;
+    flex-shrink: 0;
+    margin-left: auto;
+}
+.rf-mi-close:hover { border-color: var(--ACCENT, #00596b); color: #fff; }
+.rf-mi-row   { display: flex; gap: 8px; margin-bottom: 4px; font-size: 11px; }
+.rf-mi-label { color: #555; width: 60px; flex-shrink: 0; font-size: 10px; padding-top: 1px; text-transform: uppercase; letter-spacing: 0.3px; }
+.rf-mi-val   { color: #bbb; flex: 1; }
+.rf-mi-live-badge {
+    display: inline-flex; align-items: center;
+    background: #1a3d1a; border: 1px solid #4caf50; color: #4caf50;
+    border-radius: 10px; font-size: 10px; padding: 1px 7px;
+}
+.rf-mi-links {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    padding: 6px 8px; border-top: 1px solid #2a2a2a;
+}
+.rf-mi-link {
+    font-size: 11px; padding: 3px 8px;
+    background: var(--BGCOLOR2, #2a2a2a); border: 1px solid #444;
+    border-radius: 3px; color: #aaa; text-decoration: none; transition: all 0.1s;
+}
+.rf-mi-link:hover { border-color: var(--ACCENT, #00596b); color: #fff; }
+.rf-mi-img-wrap       { padding: 6px 8px; }
+.rf-mi-img            { max-width: 100%; border-radius: 4px; display: block; }
+.rf-mi-photo-credit   { font-size: 10px; color: #555; margin-top: 3px; }
+.rf-mi-img-loading, .rf-mi-img-none { font-size: 11px; color: #555; font-style: italic; }
+
+/* ── Distance tab ────────────────────────────────────────────────────────── */
+.rf-dist-content {
+    padding: 10px 4px 4px 4px;
+}
+
+.rf-dist-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    flex-wrap: nowrap;
+}
+
+.rf-dist-label {
+    font-size: 11px;
+    color: #888;
+    flex-shrink: 0;
+    min-width: 38px;
+}
+.rf-dist-label-lon { min-width: 28px; }
+
+.rf-dist-input {
+    flex: 1;
+    padding: 4px 6px;
+    background: var(--BGCOLOR2, #2a2a2a);
+    border: 1px solid #444;
+    border-radius: 3px;
+    color: #ccc;
+    font-size: 12px;
+    min-width: 0;
+}
+.rf-dist-input:focus { outline: none; border-color: var(--ACCENT, #00596b); }
+
+.rf-dist-coord {
+    flex: 1;
+    min-width: 0;
+}
+
+.rf-dist-small {
+    flex: 0 0 68px;
+    width: 68px;
+}
+
+.rf-dist-select {
+    flex: 1;
+    padding: 4px 6px;
+    background: var(--BGCOLOR2, #2a2a2a);
+    border: 1px solid #444;
+    border-radius: 3px;
+    color: #ccc;
+    font-size: 12px;
+    cursor: pointer;
+    min-width: 0;
+}
+.rf-dist-select:focus { outline: none; border-color: var(--ACCENT, #00596b); }
+
+.rf-dist-unit {
+    font-size: 11px;
+    color: #666;
+    flex-shrink: 0;
+}
+
+.rf-dist-to {
+    font-size: 11px;
+    color: #555;
+    flex-shrink: 0;
+    margin: 0 2px;
+}
+
+.rf-dist-savebtn { margin-left: auto; flex-shrink: 0; }
+.rf-dist-delbtn  { flex-shrink: 0; }
+.rf-dist-clearbtn { margin-left: 8px; }
+
+.rf-dist-alt-row { flex-wrap: wrap; gap: 4px; }
+
+.rf-dist-radio-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: #ccc;
+    cursor: pointer;
+    user-select: none;
+}
+.rf-dist-radio-label input[type="radio"] {
+    accent-color: var(--ACCENT, #00596b);
+    cursor: pointer;
+}
+
+.rf-dist-status {
+    font-size: 11px;
+    color: var(--ACCENT, #00596b);
+    margin-top: 4px;
+    padding: 4px 0;
+    line-height: 1.4;
+}

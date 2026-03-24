@@ -1,8 +1,32 @@
 # Robs Filters for tar1090
 
+> **BETA - Work In Progress**
+> This panel is functional but has known issues under active development. Use at your own risk.
+
 A multi-tab aircraft filter panel for [tar1090](https://github.com/wiedehopf/tar1090). Adds a **RF** button to the header bar that opens a sidebar panel with live filtering across routes, airports, countries, operators, aircraft type, alerts, and distance zones.
 
-![tar1090 with Robs Filters panel](screenshot.png)
+---
+
+## Screenshots
+
+| Airports | Countries |
+|---|---|
+| ![Airports tab](Screenshots/Screenshot%202026-03-24%20130258.png) | ![Countries tab](Screenshots/Screenshot%202026-03-24%20130316.png) |
+
+| Operators | Aircraft |
+|---|---|
+| ![Operators tab](Screenshots/Screenshot%202026-03-24%20130331.png) | ![Aircraft tab](Screenshots/Screenshot%202026-03-24%20130343.png) |
+
+---
+
+## Known Issues
+
+- **Alerts tab filtering** - campaign, category and tag filters have known bugs. Live aircraft matching works but filter interactions need work.
+- **Distance filter** - zone saving and apply behaviour has rough edges.
+- **Route data** - depends on `TAR1090_USEROUTEAPI=true`. If routes are not loading, check this is set.
+- Cross-tab filter state can occasionally get out of sync after rapid tab switching.
+
+If you hit a bug, raise an issue: [github.com/robertcanavan/tar1090-robs-filters/issues](https://github.com/robertcanavan/tar1090-robs-filters/issues)
 
 ---
 
@@ -19,7 +43,7 @@ A multi-tab aircraft filter panel for [tar1090](https://github.com/wiedehopf/tar
 | **Aircraft** | Category filter pills (jet, prop, heli, etc.) + country of registration dropdown. Sortable. |
 | **Alerts** | Integrates with [plane-alert-db](https://github.com/sdr-enthusiasts/plane-alert-db). Shows live matched aircraft with campaign, category and tag filters. Map filter button to isolate alert aircraft on map. |
 | **Distance** | Define named zones by lat/lon + radius (nm). Filter map to aircraft within a zone. Zones are saved. |
-| **Settings** | Toggle tab visibility. All settings persisted to localStorage. |
+| **Settings** | Toggle tab visibility. GitHub link. All settings persisted to localStorage. |
 
 ### General
 
@@ -36,7 +60,7 @@ A multi-tab aircraft filter panel for [tar1090](https://github.com/wiedehopf/tar
 Add the following to your tar1090 `docker-compose.yml` environment:
 
 ```yaml
-- TAR1090_CONFIGJS_APPEND=(function(){var b='https://cdn.jsdelivr.net/gh/robertcanavan/tar1090-robs-filters@latest/';function load(){var l=document.createElement('link');l.rel='stylesheet';l.href=b+'robs-filter.css';document.head.appendChild(l);var s=document.createElement('script');s.src=b+'robs-filter.js';document.head.appendChild(s);}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',load):load();})();
+- TAR1090_CONFIGJS_APPEND=(function(){var b='https://raw.githubusercontent.com/robertcanavan/tar1090-robs-filters/main/';function load(){var l=document.createElement('link');l.rel='stylesheet';l.href=b+'robs-filter.css';document.head.appendChild(l);var s=document.createElement('script');s.src=b+'robs-filter.js';document.head.appendChild(s);}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',load):load();})();
 ```
 
 Then restart your container:
@@ -45,17 +69,7 @@ Then restart your container:
 docker compose up -d
 ```
 
-No rebuild required. The files are loaded from jsDelivr CDN at page load time.
-
-### Pin to a specific version
-
-Replace `@latest` with a release tag to avoid picking up breaking changes:
-
-```yaml
-b='https://cdn.jsdelivr.net/gh/robertcanavan/tar1090-robs-filters@v1.0.0/'
-```
-
-Available versions: see [Releases](https://github.com/robertcanavan/tar1090-robs-filters/releases)
+No rebuild required. Files are loaded directly from GitHub at page load time.
 
 ---
 

@@ -140,7 +140,9 @@ Controls panel behaviour. All settings are saved to `localStorage` automatically
 
 ## Install
 
-Add the following to your tar1090 `docker-compose.yml` environment:
+### docker-compose.yml
+
+Add the following to your tar1090 service environment:
 
 ```yaml
 - TAR1090_CONFIGJS_APPEND=(function(){var b='https://cdn.jsdelivr.net/gh/robertcanavan/tar1090-robs-filters@main/';function load(){var l=document.createElement('link');l.rel='stylesheet';l.href=b+'robs-filter.css';document.head.appendChild(l);var s=document.createElement('script');s.src=b+'robs-filter.js';document.head.appendChild(s);}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',load):load();})();
@@ -153,6 +155,24 @@ docker compose up -d
 ```
 
 No rebuild required. Files are loaded from jsDelivr CDN at page load time.
+
+---
+
+### ADSB.im feeder
+
+If you are running an [ADSB.im](https://adsb.im) feeder image, you can add Robs Filters through the web UI without editing any files.
+
+1. Open your feeder web UI and go to **Setup**
+2. Click **Expert** at the top
+3. Under **Add environment variables to containers**, paste the following and click **Apply**:
+
+```
+TAR1090_CONFIGJS_APPEND=(function(){var b='https://cdn.jsdelivr.net/gh/robertcanavan/tar1090-robs-filters@main/';function load(){var l=document.createElement('link');l.rel='stylesheet';l.href=b+'robs-filter.css';document.head.appendChild(l);var s=document.createElement('script');s.src=b+'robs-filter.js';document.head.appendChild(s);}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',load):load();})();
+```
+
+![ADSB.im Expert Setup](Screenshots/ADSN.Im-Feeder.png)
+
+The RF button will appear in your tar1090 map header immediately after applying.
 
 ---
 

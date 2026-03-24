@@ -23,7 +23,7 @@
     };
 
     // Module-level settings (not part of tab filter state)
-    const settings = { inView: false };
+    const settings = { inView: false, displayMode: 'popup', sidebarSide: 'right' };
 
     // ── Per-tab visibility (persisted) ────────────────────────────────────────
     var TAB_VIS_KEY    = 'rf_tab_vis_v1';
@@ -1124,6 +1124,23 @@
                 '<div class="rf-setting-desc">Panel lists and map filter only consider aircraft currently visible in the map viewport.</div>' +
                 '</div>' +
                 '<div class="rf-setting-divider"></div>' +
+                '<div class="rf-setting-section-title">Panel Mode</div>' +
+                '<div class="rf-setting-row">' +
+                '<div style="display:flex;flex-direction:column;gap:6px">' +
+                '<label class="rf-setting-label"><input type="radio" name="rf-display-mode" value="popup"' + (settings.displayMode !== 'sidebar' ? ' checked' : '') + ' onchange="window._rfSetDisplayMode(\'popup\')"> Popup (floating)</label>' +
+                '<label class="rf-setting-label"><input type="radio" name="rf-display-mode" value="sidebar"' + (settings.displayMode === 'sidebar' ? ' checked' : '') + ' onchange="window._rfSetDisplayMode(\'sidebar\')"> Sidebar (full height)</label>' +
+                '</div>' +
+                '<div class="rf-setting-desc">Popup floats over the map and can be dragged. Sidebar docks full height to the edge of the screen.</div>' +
+                '</div>' +
+                (settings.displayMode === 'sidebar' ?
+                '<div class="rf-setting-row">' +
+                '<div class="rf-setting-desc" style="padding-left:0;margin-bottom:4px">Side</div>' +
+                '<div style="display:flex;gap:16px">' +
+                '<label class="rf-setting-label"><input type="radio" name="rf-sidebar-side" value="left"' + (settings.sidebarSide === 'left' ? ' checked' : '') + ' onchange="window._rfSetSidebarSide(\'left\')"> Left</label>' +
+                '<label class="rf-setting-label"><input type="radio" name="rf-sidebar-side" value="right"' + (settings.sidebarSide !== 'left' ? ' checked' : '') + ' onchange="window._rfSetSidebarSide(\'right\')"> Right</label>' +
+                '</div>' +
+                '</div>' : '') +
+                '<div class="rf-setting-divider"></div>' +
                 '<div class="rf-setting-section-title">Visible Tabs</div>' +
                 '<div class="rf-setting-desc" style="margin-bottom:8px">Choose which tabs appear in the panel. Settings are saved automatically.</div>' +
                 [
@@ -1642,10 +1659,46 @@
 
     window._rfSetInView = function (on) {
         settings.inView = !!on;
-        try { localStorage.setItem(SETTINGS_KEY, JSON.stringify({ inView: settings.inView })); } catch (e) {}
+        saveSettings();
         applyFilter();
         buildPanel();
     };
+
+    window._rfSetDisplayMode = function (mode) {
+        settings.displayMode = mode;
+        saveSettings();
+        applyPanelMode();
+        buildPanel();
+    };
+
+    window._rfSetSidebarSide = function (side) {
+        settings.sidebarSide = side;
+        saveSettings();
+        applyPanelMode();
+    };
+
+    function saveSettings() {
+        try {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+                inView:      settings.inView,
+                displayMode: settings.displayMode,
+                sidebarSide: settings.sidebarSide,
+            }));
+        } catch (e) {}
+    }
+
+    function applyPanelMode() {
+        var panel = document.getElementById('rf-panel');
+        if (!panel) return;
+        panel.classList.remove('rf-sidebar', 'rf-sidebar-left', 'rf-sidebar-right');
+        if (settings.displayMode === 'sidebar') {
+            panel.classList.add('rf-sidebar');
+            panel.classList.add(settings.sidebarSide === 'left' ? 'rf-sidebar-left' : 'rf-sidebar-right');
+            // Clear any positions left over from dragging
+            panel.style.left = '';
+            panel.style.top  = '';
+        }
+    }
 
     window._rfAlertsFilter = function () {
         var cmpgEl = document.getElementById('rf-al-cmpg');
@@ -1857,13 +1910,14 @@
         var panel = document.getElementById('rf-panel');
         if (!panel) return;
         panel.style.display = state.panelOpen ? 'flex' : 'none';
-        if (state.panelOpen) buildPanel();
+        if (state.panelOpen) { applyPanelMode(); buildPanel(); }
     }
 
     // ── Drag support ──────────────────────────────────────────────────────────
     function makeDraggable(panel, handle) {
         var startX, startY, startLeft, startTop;
         handle.addEventListener('mousedown', function (e) {
+            if (settings.displayMode === 'sidebar') return;
             if (e.target.classList.contains('rf-close')) return;
             startX    = e.clientX;
             startY    = e.clientY;
@@ -1938,7 +1992,8 @@
         // Load persisted settings
         try {
             var sv = localStorage.getItem(SETTINGS_KEY);
-            if (sv) { var sp = JSON.parse(sv); if (typeof sp.inView === 'boolean') settings.inView = sp.inView; }
+            if (sv) { var sp = JSON.parse(sv); if (typeof sp.inView === 'boolean') settings.inView = sp.inView; if (sp.displayMode === 'sidebar') settings.displayMode = 'sidebar'; if (sp.sidebarSide === 'left') settings.sidebarSide = 'left'; }
+            applyPanelMode();
         } catch (e) {}
         try {
             var tv = localStorage.getItem(TAB_VIS_KEY);

@@ -586,6 +586,36 @@
 .rf-mi-photo-credit   { font-size: 10px; color: #555; margin-top: 3px; }
 .rf-mi-img-loading, .rf-mi-img-none { font-size: 11px; color: #555; font-style: italic; }
 
+/* ── Sidebar mode ────────────────────────────────────────────────────────── */
+#rf-panel.rf-sidebar {
+    top: 0 !important;
+    bottom: 0 !important;
+    max-height: 100vh !important;
+    border-radius: 0 !important;
+    width: 400px !important;
+}
+
+#rf-panel.rf-sidebar-left {
+    left: 0 !important;
+    right: auto !important;
+    border-left: none !important;
+}
+
+#rf-panel.rf-sidebar-right {
+    right: 0 !important;
+    left: auto !important;
+    border-right: none !important;
+}
+
+#rf-panel.rf-sidebar .rf-list {
+    max-height: none !important;
+}
+
+#rf-panel.rf-sidebar .rf-header {
+    border-radius: 0 !important;
+    cursor: default !important;
+}
+
 /* ── Distance tab ────────────────────────────────────────────────────────── */
 .rf-dist-content {
     padding: 10px 4px 4px 4px;

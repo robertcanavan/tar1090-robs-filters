@@ -1153,26 +1153,32 @@
                 '<div class="rf-setting-section-title">About</div>' +
                 '<div class="rf-about">' +
                 '<div class="rf-about-title">Robs Filters <span style="font-size:11px;font-weight:normal;background:#7a3300;color:#ffb366;padding:2px 7px;border-radius:3px;margin-left:6px;vertical-align:middle">BETA</span></div>' +
-                '<div style="background:#1a0a0a;border:1px solid #7a3300;color:#ffb366;padding:8px 10px;border-radius:4px;font-size:12px;margin-bottom:8px">' +
+                '<div style="background:#1a0a0a;border:1px solid #7a3300;color:#ffb366;padding:8px 10px;border-radius:4px;font-size:12px;margin-bottom:10px">' +
                 '<strong>Work in progress</strong> \u2014 use at your own risk.<br>' +
                 '<strong>Known issues:</strong><ul style="margin:4px 0 0 16px;padding:0">' +
                 '<li>Alerts tab filtering (campaign/category/tag) has known bugs</li>' +
                 '<li>Distance filter zone saving has rough edges</li>' +
                 '<li>Cross-tab state can occasionally desync after rapid tab switching</li>' +
                 '</ul></div>' +
-                '<div class="rf-about-body">' +
-                'Filter aircraft by route, airport, country, operator, and type. ' +
-                'Cross-tab filtering means selecting a filter on one tab automatically ' +
-                'narrows the data shown on all other tabs.' +
+                '<div class="rf-about-body" style="font-size:12px;line-height:1.6">' +
+                'Filters are <strong>AND-ed across tabs</strong> and <strong>OR-ed within a tab</strong>. ' +
+                'Active filters appear as chips in the breadcrumb bar and are applied live to the map by patching tar1090\'s internal <code>isFiltered</code> function.' +
                 '</div>' +
-                '<div class="rf-about-body">' +
-                'Active filters are shown as chips in the breadcrumb bar and applied live to the map.' +
+                '<div class="rf-setting-divider" style="margin:10px 0"></div>' +
+                '<div style="font-size:12px;line-height:1.8">' +
+                '<strong>Airports</strong> \u2014 uses <code>plane.routeString</code> and <code>g.route_cache</code> for departure/arrival ICAO codes and full airport names. Requires <code>TAR1090_USEROUTEAPI=true</code>.<br>' +
+                '<strong>Countries</strong> \u2014 derives country from the route cache <code>countryiso2</code> field, falling back to a built-in ICAO airport prefix table (e.g. EG\u2192UK, LF\u2192France).<br>' +
+                '<strong>Operators</strong> \u2014 reads <code>g.route_cache[callsign].airline_code</code> (3-letter ICAO code) and resolves to full airline name via built-in lookup table.<br>' +
+                '<strong>Aircraft</strong> \u2014 uses <code>plane.typeLong</code> / <code>plane.icaoType</code> for type, <code>plane.category</code> (ADS-B emitter) and <code>plane.wtc</code> (wake turbulence) for category classification. Registration country is derived from the aircraft\'s ICAO 24-bit hex address using ICAO allocation ranges \u2014 no callsign needed.<br>' +
+                '<strong>Alerts</strong> \u2014 fetches plane-alert-db CSV from GitHub, cached 24h in localStorage. Matches live aircraft by <code>plane.icao</code> hex.<br>' +
+                '<strong>Distance</strong> \u2014 uses <code>plane.lat</code> / <code>plane.lon</code> with the Haversine formula (great-circle distance in nm). Optional altitude band uses <code>plane.alt_baro</code>. Zones saved to localStorage.' +
                 '</div>' +
-                '<div style="margin-top:10px">' +
+                '<div class="rf-setting-divider" style="margin:10px 0"></div>' +
+                '<div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">' +
                 '<a href="https://github.com/robertcanavan/tar1090-robs-filters" target="_blank" ' +
-                'style="display:inline-block;padding:5px 12px;background:#0d2b0d;border:1px solid #00ff41;color:#00ff41;text-decoration:none;border-radius:3px;font-size:12px">&#128279; View on GitHub</a>' +
-                ' <a href="https://github.com/robertcanavan/tar1090-robs-filters/issues" target="_blank" ' +
-                'style="display:inline-block;padding:5px 12px;background:#0d2b0d;border:1px solid #00ff41;color:#00ff41;text-decoration:none;border-radius:3px;font-size:12px;margin-left:6px">&#x26a0; Report an Issue</a>' +
+                'style="display:inline-block;padding:5px 12px;background:#0d2b0d;border:1px solid #00ff41;color:#00ff41;text-decoration:none;border-radius:3px;font-size:12px">&#128279; GitHub &amp; Full Docs</a>' +
+                '<a href="https://github.com/robertcanavan/tar1090-robs-filters/issues" target="_blank" ' +
+                'style="display:inline-block;padding:5px 12px;background:#0d2b0d;border:1px solid #00ff41;color:#00ff41;text-decoration:none;border-radius:3px;font-size:12px">&#x26a0; Report an Issue</a>' +
                 '</div>' +
                 '<div class="rf-about-made">Made by Rob \u2014 solving problems that are entirely his own fault, one tab at a time.</div>' +
                 '</div>' +

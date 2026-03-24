@@ -1152,21 +1152,27 @@
                 '<div class="rf-setting-divider"></div>' +
                 '<div class="rf-setting-section-title">About</div>' +
                 '<div class="rf-about">' +
-                '<div class="rf-about-title">Robs Filters</div>' +
+                '<div class="rf-about-title">Robs Filters <span style="font-size:11px;font-weight:normal;background:#7a3300;color:#ffb366;padding:2px 7px;border-radius:3px;margin-left:6px;vertical-align:middle">BETA</span></div>' +
+                '<div style="background:#1a0a0a;border:1px solid #7a3300;color:#ffb366;padding:8px 10px;border-radius:4px;font-size:12px;margin-bottom:8px">' +
+                '<strong>Work in progress</strong> \u2014 use at your own risk.<br>' +
+                '<strong>Known issues:</strong><ul style="margin:4px 0 0 16px;padding:0">' +
+                '<li>Alerts tab filtering (campaign/category/tag) has known bugs</li>' +
+                '<li>Distance filter zone saving has rough edges</li>' +
+                '<li>Cross-tab state can occasionally desync after rapid tab switching</li>' +
+                '</ul></div>' +
                 '<div class="rf-about-body">' +
-                'Built by Rob because he is special and wanted more control ' +
-                'over his ADS-B map than tar1090 offered out of the box. ' +
-                'Includes integration with the plane-alert-db database of special and interesting aircraft.' +
-                '</div>' +
-                '<div class="rf-about-body">' +
-                'Filter aircraft by airport, country, operator, and type. ' +
+                'Filter aircraft by route, airport, country, operator, and type. ' +
                 'Cross-tab filtering means selecting a filter on one tab automatically ' +
                 'narrows the data shown on all other tabs.' +
                 '</div>' +
                 '<div class="rf-about-body">' +
-                'The \u2699 settings tab controls panel behaviour. ' +
-                'Active filters are shown as chips in the breadcrumb bar ' +
-                'and are applied live to the map.' +
+                'Active filters are shown as chips in the breadcrumb bar and applied live to the map.' +
+                '</div>' +
+                '<div style="margin-top:10px">' +
+                '<a href="https://github.com/robertcanavan/tar1090-robs-filters" target="_blank" ' +
+                'style="display:inline-block;padding:5px 12px;background:#0d2b0d;border:1px solid #00ff41;color:#00ff41;text-decoration:none;border-radius:3px;font-size:12px">&#128279; View on GitHub</a>' +
+                ' <a href="https://github.com/robertcanavan/tar1090-robs-filters/issues" target="_blank" ' +
+                'style="display:inline-block;padding:5px 12px;background:#0d2b0d;border:1px solid #00ff41;color:#00ff41;text-decoration:none;border-radius:3px;font-size:12px;margin-left:6px">&#x26a0; Report an Issue</a>' +
                 '</div>' +
                 '<div class="rf-about-made">Made by Rob \u2014 solving problems that are entirely his own fault, one tab at a time.</div>' +
                 '</div>' +

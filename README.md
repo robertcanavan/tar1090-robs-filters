@@ -1,9 +1,6 @@
 # Robs Filters for tar1090
 
-> **BETA - Work In Progress**
-> This panel is functional but has known issues under active development. Use at your own risk.
-
-A multi-tab aircraft filter panel for [tar1090](https://github.com/wiedehopf/tar1090). Adds a **RF** button to the header bar that opens a sidebar panel with live filtering across routes, airports, countries, operators, aircraft type, alerts, and distance zones.
+A multi-tab aircraft filter panel for [tar1090](https://github.com/wiedehopf/tar1090). Click the **RF** button in the header bar to open a sidebar with live filtering across routes, airports, countries, operators, aircraft types, alerts, and distance zones. All filters are AND-ed together across tabs so you can combine them however you like.
 
 ---
 
@@ -19,122 +16,88 @@ A multi-tab aircraft filter panel for [tar1090](https://github.com/wiedehopf/tar
 
 ---
 
-## Known Issues
-
-- **Alerts tab filtering** - campaign, category and tag filters have known bugs. Live aircraft matching works but filter interactions need work.
-- **Distance filter** - zone saving and apply behaviour has rough edges.
-- **Route data** - depends on `TAR1090_USEROUTEAPI=true`. If routes are not loading, check this is set.
-- Cross-tab filter state can occasionally get out of sync after rapid tab switching.
-
-If you hit a bug, raise an issue: [github.com/robertcanavan/tar1090-robs-filters/issues](https://github.com/robertcanavan/tar1090-robs-filters/issues)
-
----
-
-## How It Works
+## What It Does
 
 ### Filter logic
 
-Every tab maintains its own independent filter state. When you select items in multiple tabs, the filters are **AND-ed** together — a plane must pass all active tabs to be shown. Within a single tab, multiple selected items are **OR-ed** — selecting London Heathrow and Manchester means flights from either airport pass.
+Each tab has its own independent filter state. Multiple tabs active at the same time are AND-ed — a plane has to pass every active tab to stay on the map. Within a single tab, multiple selected items are OR-ed — picking Heathrow and Manchester shows flights through either.
 
-Filters work by patching tar1090's internal `PlaneObject.prototype.isFiltered` function. This is the same mechanism tar1090 uses for its own built-in filters, so Robs Filters chains cleanly alongside them without replacing any core behaviour.
+Filtering works by patching tar1090's internal `PlaneObject.prototype.isFiltered` function, the same hook tar1090 uses for its own built-in filters. It chains cleanly without replacing anything.
 
-The panel rebuilds its lists every 3 seconds to reflect aircraft that have appeared or disappeared, and reapplies all active filters live to the map on every update.
+The panel rebuilds its lists every few seconds to pick up aircraft that have come and gone, and reapplies all active filters to the map live on every update.
+
+---
+
+### Summary tab
+
+Opens by default. Shows a live count of what is on screen broken down by category. Each count is a button — click it to instantly filter the map to that category. Click again to clear it.
 
 ---
 
 ### Airports tab
 
-**Data source:** `plane.routeString` and `g.route_cache`
+Reads route data from tar1090's `plane.routeString` and `g.route_cache`. When `TAR1090_USEROUTEAPI=true` is set, tar1090 fetches route data automatically for every callsign it sees and caches it in memory.
 
-tar1090 provides each aircraft's route as a string (e.g. `LGW - JFK`) when `TAR1090_USEROUTEAPI=true` is set. The panel parses this and cross-references it against tar1090's internal route cache (`g.route_cache`), which holds full airport objects including ICAO code, name, city, and country ISO code.
+The From / Both / To toggle controls which end of the route is matched. Select **From** to show only aircraft departing a specific airport, **To** for arrivals, **Both** for either.
 
-- The departure airport ICAO is taken from the first entry in `_airports[]` in the route cache
-- The arrival airport ICAO is taken from the last entry
-- If the route cache entry is not yet populated (it loads asynchronously), the panel falls back to parsing the raw `routeString` directly and using the ICAO codes from that
-- Airport names shown in the list come from the route cache `name` field
-- Country flags come from the `countryiso2` field in the route cache
-- Aircraft without route data (military, VFR, untracked callsigns) will not appear in this tab
-
-The direction toggle (From / Both / To) filters which airports are counted: `From` counts only departures, `To` counts only arrivals, `Both` counts either.
+Aircraft without route data (military, VFR, untracked callsigns) won't appear here — use the Aircraft tab for those.
 
 ---
 
 ### Countries tab
 
-**Data source:** `plane.routeString`, `g.route_cache`, and built-in airport prefix lookup
-
-Country is derived from the departure and arrival airports. Two resolution methods are used in order:
-
-1. **Route cache:** if the airport object has a `countryiso2` field, that is used directly
-2. **ICAO prefix table:** if no `countryiso2` is available, the first two letters of the airport's ICAO code are looked up in a built-in prefix table (e.g. `EG` = United Kingdom, `LF` = France, `OE` = Saudi Arabia). Special cases handle `K` prefixes (United States), `C` prefixes (Canada), and `P4`-length codes (United States territories)
-
-Country names are resolved from ISO 3166-1 alpha-2 codes using a built-in lookup table. Flags are rendered from the same ISO code.
-
-The From / Both / To direction toggle works the same as on the Airports tab.
+Country is derived from the departure and arrival airports. Two methods are tried in order: the `countryiso2` field from the route cache, then a built-in ICAO prefix table (e.g. `EG` = UK, `LF` = France). From / Both / To works the same as Airports.
 
 ---
 
 ### Operators tab
 
-**Data source:** `g.route_cache[callsign].airline_code`
-
-tar1090's route cache includes the 3-letter ICAO airline code for each flight (e.g. `BAW` for British Airways, `EZY` for easyJet). The panel reads this code and resolves it to a full airline name using a built-in lookup table of ~100 common operators.
-
-If the airline code is not in the built-in table, the raw code is shown as-is. Only aircraft with a populated route cache entry will appear — flights without callsigns or with unrecognised callsigns will not be listed.
+Reads the 3-letter ICAO airline code from `g.route_cache` and resolves it to a full airline name. If the code isn't in the built-in table it shows the raw code. Only flights with a recognised callsign appear here.
 
 ---
 
 ### Aircraft tab
 
-**Data source:** `plane.typeLong`, `plane.icaoType`, `plane.category`, `plane.wtc`, `plane.icao`
+Lists every aircraft type currently on screen, grouped and counted. Click any type to filter the map to just those aircraft.
 
-Each aircraft is identified by its type. `plane.typeLong` (e.g. `Boeing 737-800`) is used as the display key where available, falling back to `plane.icaoType` (e.g. `B738`). Surface vehicles (ADS-B category `C0`–`C3`) are excluded.
+**Category filters** sit across the top of the tab — Heavy, Jet, Business, Turboprop, Helicopter, Military, Light. Each button shows a live count of how many aircraft of that category are visible. Click to filter. Click again to deselect. You can select multiple categories at once — selecting Military and Helicopter shows only military helicopters.
 
-**Category classification** uses a 3-tier lookup in order:
+Military detection uses three methods in order:
+- `plane.military` flag set by tar1090 directly
+- ADS-B emitter category `A6` (high performance / military)
+- A built-in table of known military ICAO type codes
 
-1. **ICAO type table:** a built-in table maps several hundred ICAO type designators to one of 7 categories (Heavy, Jet, Business, Turboprop, Helicopter, Military, Light)
-2. **ADS-B emitter category:** if the type is not in the table, `plane.category` is used (e.g. `A5` = Heavy, `A7` = Rotorcraft, `A1` = Light)
-3. **Wake turbulence category:** if neither of the above resolves, `plane.wtc` is used (`J`/`H` = Heavy, `L` = Light)
+**Registration country** filter is a dropdown below the category buttons. This uses the aircraft's ICAO hex address to determine registration country via a binary search of ICAO block allocations — works without any callsign or route data.
 
-**Registration country** is determined by a binary search of ICAO 24-bit address ranges. Each country is allocated a block of ICAO hex addresses by ICAO, so the aircraft's hex code (`plane.icao`) alone is enough to determine where it is registered. This works even with no callsign or route data.
-
-The country dropdown in the Aircraft tab uses this mechanism to filter by registration country independently of where the aircraft is flying.
+**Local databases** (optional) — enable via Settings to download OurAirports and VRS Standing Data route databases once per 24 hours. These are cached in localStorage and let the panel resolve airport names and routes for aircraft that the live API hasn't seen yet.
 
 ---
 
 ### Alerts tab
 
-**Data source:** [plane-alert-db](https://github.com/sdr-enthusiasts/plane-alert-db) fetched from GitHub
+On first open, fetches [plane-alert-db](https://github.com/sdr-enthusiasts/plane-alert-db) from GitHub and caches it in localStorage for 24 hours. This database has thousands of aircraft of interest — military, government, special operations, and notable registrations.
 
-On first load of the Alerts tab, the panel fetches the plane-alert-db CSV file directly from GitHub. This database contains thousands of aircraft of interest — military, government, special operations, interesting registrations, and more. The fetched data is cached in `localStorage` for 24 hours (`rf_alerts_v1` key) to avoid repeated downloads.
-
-Matching is done by comparing each live aircraft's `plane.icao` hex against the ICAO codes in the database (case-insensitive). Matched aircraft are shown in the list with their campaign, category, and tag metadata from the database.
-
-The **Map Filter** button builds a Set of all matching ICAOs and applies it through the same `isFiltered` hook, hiding all non-alert aircraft from the map. Clicking individual rows adds them to a selected set, which takes priority over the broad map filter.
-
-> Note: the campaign/category/tag filter dropdowns have known bugs in the current beta.
+**Map Filter** hides everything except matched aircraft. Clicking individual rows selects specific aircraft.
 
 ---
 
 ### Distance tab
 
-**Data source:** `plane.lat`, `plane.lon`, `plane.altitude` / `plane.alt_baro`
+Define a zone by setting a centre point and a radius in nautical miles. The centre point is set by clicking on a small embedded Leaflet map directly in the panel — no manual lat/lon entry needed. The map shows your current receiver position as the default, and a circle preview updates as you adjust the radius.
 
-You define a named zone by entering a centre point (lat/lon) and a radius in nautical miles. Zones are saved to `localStorage` (`rf_dist_locs_v1` key) and persist across sessions.
+Zones are saved to localStorage and persist across sessions. An optional altitude band lets you further limit to aircraft within a specific altitude range in feet.
 
-When a zone filter is applied, each aircraft's distance from the zone centre is calculated using the **Haversine formula** (great-circle distance). Aircraft outside the radius are filtered out.
-
-An optional altitude band filter can be added — when set to `Between`, only aircraft with a barometric altitude (`plane.alt_baro`) or pressure altitude (`plane.altitude`) within the specified range in feet are shown. Aircraft with no position data are passed through rather than filtered out.
+Distance is calculated using the Haversine formula (great-circle). Aircraft with no position data pass through rather than being filtered out.
 
 ---
 
 ### Settings tab
 
-Controls panel behaviour. All settings are saved to `localStorage` automatically.
-
-- **Only include aircraft in map view** — when enabled, all tab lists and filters only consider aircraft currently visible in the map viewport (`plane.inView`). Useful for busy airspace where you want to focus on what is on screen.
-- **Visible Tabs** — toggle which tabs appear. Hidden tabs are still functional; their filters remain active if set before hiding.
-- **Alerts Database** — shows the last fetch timestamp and allows a manual refresh.
+- **Only aircraft in map view** — limits all lists and filters to what is currently visible on screen. On by default.
+- **Display mode** — sidebar (default) or popup. Sidebar positions the panel next to tar1090's own info panel so they don't overlap.
+- **Use local databases** — enables OurAirports and VRS route data downloads. On by default.
+- **Visible tabs** — hide any tab you don't use. Hidden tabs keep their filter state if already set.
+- **Alerts database** — shows last fetch time, manual refresh button.
 
 ---
 
@@ -142,25 +105,25 @@ Controls panel behaviour. All settings are saved to `localStorage` automatically
 
 ### docker-compose.yml
 
-Add the following to your tar1090 service environment:
+Add to your tar1090 service environment:
 
 ```yaml
 - TAR1090_CONFIGJS_APPEND=(function(){var b='https://cdn.jsdelivr.net/gh/robertcanavan/tar1090-robs-filters@main/';function load(){var l=document.createElement('link');l.rel='stylesheet';l.href=b+'robs-filter.css';document.head.appendChild(l);var s=document.createElement('script');s.src=b+'robs-filter.js';document.head.appendChild(s);}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',load):load();})();
 ```
 
-Then restart your container:
+Restart the container:
 
 ```bash
 docker compose up -d
 ```
 
-No rebuild required. Files are loaded from jsDelivr CDN at page load time.
+No rebuild needed. Files load from jsDelivr CDN at page load.
 
 ---
 
 ### ADSB.im feeder
 
-If you are running an [ADSB.im](https://adsb.im) feeder image, you can add Robs Filters through the web UI without editing any files.
+If you run an [ADSB.im](https://adsb.im) feeder image, you can add Robs Filters through the web UI.
 
 1. Open your feeder web UI and go to **Setup**
 2. Click **Expert** at the top
@@ -172,15 +135,15 @@ TAR1090_CONFIGJS_APPEND=(function(){var b='https://cdn.jsdelivr.net/gh/robertcan
 
 ![ADSB.im Expert Setup](Screenshots/ADSN.Im-Feeder.png)
 
-The RF button will appear in your tar1090 map header immediately after applying.
+The RF button appears in the tar1090 header immediately after applying.
 
 ---
 
 ## Requirements
 
 - tar1090 (any recent version)
-- `TAR1090_USEROUTEAPI=true` recommended - enables route data used by Routes, Airports, Countries, and Operators tabs
-- Alerts tab requires internet access to fetch [plane-alert-db](https://github.com/sdr-enthusiasts/plane-alert-db) (fetched client-side, cached 24h in localStorage)
+- `TAR1090_USEROUTEAPI=true` recommended — enables route data for the Routes, Airports, Countries, and Operators tabs
+- Alerts tab requires internet access to fetch [plane-alert-db](https://github.com/sdr-enthusiasts/plane-alert-db) (cached 24h in localStorage)
 
 ---
 

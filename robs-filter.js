@@ -11,24 +11,50 @@
     // Each tab has its own independent filter state. All active tabs are AND-ed.
     const state = {
         panelOpen:    false,
-        activeTab:    'airports',
+        activeTab:    'summary',
         tabState: {
             airports:  { items: new Set(), direction: 'both', sortBy: 'count', sortDir: 'desc' },
             countries: { items: new Set(), direction: 'both', sortBy: 'count', sortDir: 'desc' },
             operators: { items: new Set(), direction: 'both', sortBy: 'count', sortDir: 'desc' },
-            aircraft:  { items: new Set(), direction: 'both', sortBy: 'count', sortDir: 'desc', catFilter: 0, regCountryFilter: '' },
+            aircraft:  { items: new Set(), direction: 'both', sortBy: 'count', sortDir: 'desc', catFilter: new Set(), regCountryFilter: '' },
         },
         searchText:   '',
         refreshTimer: null,
     };
 
     // Module-level settings (not part of tab filter state)
-    const settings = { inView: false, displayMode: 'popup', sidebarSide: 'right' };
+    const settings = { inView: true, displayMode: 'sidebar', sidebarSide: 'right', useLocalDb: true };
+
+    // ResizeObserver / MutationObserver refs - cleaned up when leaving sidebar mode
+    var _rfObservers = [];
+
+    // ── Local database constants ──────────────────────────────────────────────
+    var DB_AIRPORTS_URL    = 'https://raw.githubusercontent.com/davidmegginson/ourairports-data/main/airports.csv';
+    var DB_AIRLINES_URL    = 'https://raw.githubusercontent.com/vradarserver/standing-data/main/airlines/schema-01/airlines.csv';
+    var DB_ROUTES_URL      = 'https://raw.githubusercontent.com/vradarserver/standing-data/main/routes/schema-01/{P}/{CODE}-all.csv';
+    var DB_SYNC_MS         = 24 * 60 * 60 * 1000;
+    var DB_KEY_AIRPORTS    = 'rf_db_airports_v1';
+    var DB_KEY_AIRPORTS_TS = 'rf_db_airports_ts';
+    var DB_KEY_AIRLINES    = 'rf_db_airlines_v1';
+    var DB_KEY_AIRLINES_TS = 'rf_db_airlines_ts';
+    var DB_KEY_ROUTES_PFX  = 'rf_db_rt_';
+
+    var _localDb = {
+        airports:       null,  // {ICAO: {n:name, c:iso2}} loaded from localStorage/fetch
+        airlines:       null,  // {CODE: name}
+        routes:         {},    // {CALLSIGN: {dep, arr}} lazy-populated per airline
+        routesFetched:  {},    // airline codes already fetched
+        routesFetching: {},    // airline codes currently in-flight
+        st: {
+            airports: { busy: false, err: null, count: 0, ts: 0 },
+            airlines: { busy: false, err: null, count: 0, ts: 0 }
+        }
+    };
 
     // ── Per-tab visibility (persisted) ────────────────────────────────────────
     var TAB_VIS_KEY    = 'rf_tab_vis_v1';
     var SETTINGS_KEY   = 'rf_settings_v1';
-    var _tabVisibility = { airports: true, countries: true, operators: true, aircraft: true, alerts: true, distance: true };
+    var _tabVisibility = { summary: true, airports: true, countries: true, operators: true, aircraft: true, alerts: true, distance: true };
 
     // ── Alerts state ──────────────────────────────────────────────────────────
     var _alertsDb        = null;  // null=not loaded, array when loaded
@@ -45,6 +71,11 @@
     var _alertsSelectedIcaos  = new Set();
 
     // ── Distance filter state ─────────────────────────────────────────────────
+    var _distMap = null;          // Leaflet map instance
+    var _distMapMarker = null;    // centre point marker
+    var _distMapCircle = null;    // radius circle
+    var _leafletReady = false;    // Leaflet loaded flag
+
     var DIST_LS_KEY        = 'rf_dist_locs_v1';
     var _distanceLocations = [];  // [{name, lat, lon, radiusNm}] persisted in localStorage
     // Applied filter -- only changes when user hits Apply
@@ -76,7 +107,7 @@
     function ts()             { return state.tabState[state.activeTab]; }
     function isFilterActive() {
         var ac = state.tabState.aircraft;
-        if (ac.catFilter !== 0 || ac.regCountryFilter !== '') return true;
+        if (ac.catFilter.size > 0 || ac.regCountryFilter !== '') return true;
         if (_alertsSelectedIcaos.size > 0) return true;
         if (_alertsMapFilter && _alertsMapFilterIcaos) return true;
         if (_distanceFilter.active) return true;
@@ -119,7 +150,9 @@
 
     function getAirlineName(code) {
         if (!code || code === 'unknown') return null;
-        return AIRLINE_NAMES[code.toUpperCase()] || code.toUpperCase();
+        var uc = code.toUpperCase();
+        if (_localDb.airlines && _localDb.airlines[uc]) return _localDb.airlines[uc];
+        return AIRLINE_NAMES[uc] || uc;
     }
 
     // ── ISO 3166-1 alpha-2 → Country name ─────────────────────────────────────
@@ -241,10 +274,25 @@
         'EC25':5,'EC30':5,'EC35':5,'EC45':5,'EC55':5,'EC75':5,'H160':5,'H175':5,
         'H215':5,'H225':5,'K126':5,'K226':5,'MI8':5,'MI17':5,'R22':5,'R44':5,
         'R66':5,'S61':5,'S76':5,'S92':5,'UH60':5,'AW139':5,'NH90':5,'TIGR':5,
-        // Military
-        'C17':6,'C130':6,'C5':6,'A400':6,'C27':6,'P8':6,'P3':6,'E3':6,'E7':6,
-        'KC135':6,'KC46':6,'MRTT':6,'B52':6,'F16':6,'F18':6,'F35':6,'F22':6,
-        'EUFI':6,'A10':6,'C2':6,'E6':6,'RC135':6,
+        // Military - fighters / attack
+        'F15':6,'F15E':6,'F16C':6,'F16D':6,'F16':6,'F18':6,'F18E':6,'F18F':6,'F18G':6,
+        'FA18':6,'F22':6,'F35':6,'FA35':6,'F104':6,'F111':6,'F14':6,'AV8B':6,'A10':6,
+        'EUFI':6,'GRIF':6,'JAS3':6,'TPHN':6,'TRNT':6,'TORN':6,'MIRF':6,'MIR2':6,
+        'RFAL':6,'SU27':6,'SU30':6,'SU35':6,'SU57':6,'MIG29':6,'MIG31':6,'MIG35':6,
+        'B1':6,'B2':6,'B21':6,'B52':6,'TU95':6,'TU22':6,'TU160':6,
+        // Military - transports / tankers / ISR
+        'C17':6,'C130':6,'C5':6,'A400':6,'C27':6,'C141':6,'C5M':6,'C130J':6,
+        'KC135':6,'KC46':6,'MRTT':6,'KC10':6,'KC130':6,'K35R':6,
+        'P8':6,'P3':6,'P1':6,'P3C':6,'E3':6,'E7':6,'E2':6,'E6':6,'E8':6,
+        'RC135':6,'U2':6,'SR71':6,'TR1':6,'RQ4':6,'MQ9':6,'MQ1':6,
+        // Military - trainers
+        'HAWK':6,'T38':6,'T45':6,'T6':6,'T6A':6,'T50':6,'M346':6,'L39':6,'L159':6,
+        'PC9':6,'PC21':6,'MB339':6,'MB326':6,'SF260':6,'G120':4,'G12T':4,
+        'AJET':6,'T37':6,'T2':6,
+        // Military - helicopters (military variants - civilian ones already in helicopter section)
+        'AH64':5,'MH60':5,'HH60':5,'CH53':5,'MH53':5,
+        'V22':6,'MV22':6,'CV22':6,'LYNX':5,'PUMA':5,
+        'MERL':5,'SH60':5,'SH3':5,
         // Light / piston
         'C172':7,'C152':7,'C182':7,'C206':7,'C210':7,'PA28':7,'P28A':7,'PA32':7,'PA24':7,
         'SR20':7,'SR22':7,'DA40':7,'DA42':7,'DA62':7,'DA20':7,'BE58':7,'BE36':7,
@@ -256,17 +304,10 @@
         'A339':1,'A337':1,          // A330-900neo, Beluga XL
         'TBM7':4,'TBM8':4,'TBM9':4, // TBM 700/850/900/910
         'E55P':3,'C68A':3,'C550':3,'C551':3, // bizjets
-        'K35R':6,'KC10':6,          // KC-135, KC-10
-        'BE9L':4,'BE90':4,'BE20':4, // King Air variants
-        'L159':6,'PC9':6,'MB339':6,'HAWK':6,'T38':6,'T45':6, // military trainers
-        'H64':5,                    // AH-64 Apache (helicopter)
+        'BE9L':4,'BE90':4,          // King Air variants
         'G2CA':5,                   // Guimbal Cabri G2
-        'G12T':4,                   // Grob G-120TP (turboprop trainer)
         'A35K':1,                   // A350-1000 (duplicate safety)
-        'C130':6,                   // C-130 Hercules
-        'A400':6,                   // A400M Atlas
-        'C17':6,                    // C-17 Globemaster
-        'G120':4,'G103':7,          // Grob types
+        'G103':7,                   // Grob G-103 glider
     };
 
     // ADS-B emitter category (plane.category) → our category ID
@@ -363,6 +404,8 @@
     let _aircraftWtc     = new Map(); // typeKey → wake turbulence category ('H','M','L','J')
     let _aircraftRegCountries = new Map(); // typeKey → Map<name, iso2>
     let _allRegCountries      = new Map(); // name → iso2 (for country dropdown)
+    let _militaryTypeKeys     = new Set(); // typeKeys where at least one plane is military
+    var _catCounts = {}; // catId → count of aircraft in that category (populated by getAircraftData)
 
     function getAircraftCategory(typeKey) {
         if (!typeKey) return 0;
@@ -387,6 +430,16 @@
         return 0;
     }
 
+    // Returns true if a plane should be treated as military.
+    // Mirrors tar1090's 'U' filter which uses plane.military (set by readsb ICAO hex range analysis).
+    function isMilitaryAircraft(plane) {
+        if (plane.military) return true;
+        if (plane.category === 'A6') return true;
+        var t = plane.typeLong || plane.icaoType;
+        if (t && getAircraftCategory(t) === 6) return true;
+        return false;
+    }
+
     // ── Route cache lookup ────────────────────────────────────────────────────
     function getCacheEntry(plane) {
         try {
@@ -400,7 +453,9 @@
 
     // ── Route parsing ─────────────────────────────────────────────────────────
     function parseRoute(plane) {
-        if (!plane.routeString) return null;
+        if (!plane.routeString) {
+            return settings.useLocalDb ? _dbGetRoute(plane) : null;
+        }
         const raw = plane.routeString.replace(/^\?\?\s*/, '').trim();
         if (!raw) return null;
         const parts = raw.split(' - ').map(function (s) { return s.trim(); });
@@ -431,6 +486,8 @@
         _aircraftWtc     = new Map();
         _aircraftRegCountries = new Map();
         _allRegCountries      = new Map();
+        _militaryTypeKeys     = new Set();
+        _catCounts = {};
 
         if (!gReady()) return { airports, countries, operators, aircraft };
 
@@ -451,14 +508,39 @@
             // Skip surface vehicles (ADS-B category C0-C3 = ground/surface)
             var isSurface = plane.category && plane.category[0] === 'C';
             var typeKey = (!isSurface && (plane.typeLong || plane.icaoType)) || null;
+            // Military aircraft with no type get a placeholder so they appear in the list
+            if (!typeKey && !isSurface && isMilitaryAircraft(plane)) typeKey = '(Military)';
             if (typeKey) {
-                aircraft.set(typeKey, (aircraft.get(typeKey) || 0) + 1);
+                // Populate metadata maps for all planes so lookups work regardless of filter
                 if (plane.icaoType && !_aircraftIcaoMap.has(typeKey))
                     _aircraftIcaoMap.set(typeKey, plane.icaoType);
                 if (plane.category && !_aircraftAdsbCat.has(typeKey))
                     _aircraftAdsbCat.set(typeKey, plane.category);
                 if (plane.wtc && !_aircraftWtc.has(typeKey))
                     _aircraftWtc.set(typeKey, plane.wtc);
+                if (isMilitaryAircraft(plane))
+                    _militaryTypeKeys.add(typeKey);
+                // Count per category for button badges
+                var cId = isMilitaryAircraft(plane) ? 6 : getAircraftCategory(typeKey);
+                if (cId) _catCounts[cId] = (_catCounts[cId] || 0) + 1;
+                // Count only planes that also pass the aircraft tab's catFilter and regCountryFilter,
+                // so the count next to each type matches what gets highlighted on the map
+                var acCur = state.tabState.aircraft;
+                var passesCat = acCur.catFilter.size === 0;
+                if (!passesCat) {
+                    passesCat = true;
+                    acCur.catFilter.forEach(function(catId) {
+                        if (catId === 6) { if (!isMilitaryAircraft(plane)) passesCat = false; }
+                        else { if (getAircraftCategory(typeKey) !== catId) passesCat = false; }
+                    });
+                }
+                var passesRc = !acCur.regCountryFilter;
+                if (!passesRc && plane.icao) {
+                    var rcCheck = getRegCountryFromIcao(plane.icao);
+                    passesRc = !!(rcCheck && rcCheck.name === acCur.regCountryFilter);
+                }
+                if (passesCat && passesRc)
+                    aircraft.set(typeKey, (aircraft.get(typeKey) || 0) + 1);
             }
 
             // Registration country caches
@@ -475,10 +557,16 @@
 
             var cache = getCacheEntry(plane);
 
-            // Operators
+            // Operators: prefer route_cache airline_code, fall back to callsign prefix with local DB
             if (cache && cache.airline_code) {
                 var code = cache.airline_code.toUpperCase();
                 operators.set(code, (operators.get(code) || 0) + 1);
+            } else if (settings.useLocalDb && (plane.name || plane.flight)) {
+                var cs = (plane.name || plane.flight || '').toUpperCase().replace(/[^A-Z]/g, '');
+                if (cs.length >= 3) {
+                    var iCode = cs.substring(0, 3);
+                    operators.set(iCode, (operators.get(iCode) || 0) + 1);
+                }
             }
 
             var route = parseRoute(plane);
@@ -497,10 +585,12 @@
                 if (!key) return;
                 apInc(airports, key, dir);
                 if (!_airportLabels.has(key)) {
-                    _airportLabels.set(key, (ap && ap.name) ? ap.name : key);
+                    var lbl = (ap && ap.name) ? ap.name : (_dbGetAirportName(key) || key);
+                    _airportLabels.set(key, lbl);
                 }
-                if (ap && ap.countryiso2 && !_airportIso2.has(key)) {
-                    _airportIso2.set(key, ap.countryiso2);
+                if (!_airportIso2.has(key)) {
+                    if (ap && ap.countryiso2) _airportIso2.set(key, ap.countryiso2);
+                    else { var aIso2 = _dbGetAirportIso2(key); if (aIso2) _airportIso2.set(key, aIso2); }
                 }
             });
 
@@ -515,7 +605,8 @@
                     iso2  = ap.countryiso2;
                     cName = countryFromIso(iso2);
                 } else if (fallbackIcao) {
-                    cName = getCountryFromAirport(fallbackIcao);
+                    iso2  = _dbGetAirportIso2(fallbackIcao);
+                    cName = iso2 ? countryFromIso(iso2) : getCountryFromAirport(fallbackIcao);
                 }
                 if (!cName) return;
                 apInc(countries, cName, dir);
@@ -536,8 +627,19 @@
         if (tabName === 'aircraft') {
             var ac = state.tabState.aircraft;
             var t = plane.typeLong || plane.icaoType;
-            if (ac.items.size > 0 && !(t && ac.items.has(t))) return false;
-            if (ac.catFilter !== 0 && getAircraftCategory(t) !== ac.catFilter) return false;
+            if (ac.items.size > 0) {
+                var tMatch = t && ac.items.has(t);
+                var milMatch = ac.items.has('(Military)') && isMilitaryAircraft(plane);
+                if (!tMatch && !milMatch) return false;
+            }
+            if (ac.catFilter.size > 0) {
+                var cfOk = true;
+                ac.catFilter.forEach(function(catId) {
+                    if (catId === 6) { if (!isMilitaryAircraft(plane)) cfOk = false; }
+                    else { if (getAircraftCategory(t) !== catId) cfOk = false; }
+                });
+                if (!cfOk) return false;
+            }
             if (ac.regCountryFilter !== '') {
                 var rcInfo = getRegCountryFromIcao(plane.icao);
                 if (!rcInfo || rcInfo.name !== ac.regCountryFilter) return false;
@@ -609,7 +711,7 @@
             if (tabName === excludeTab) continue;
             var s = state.tabState[tabName];
             var hasFilter = s.items.size > 0;
-            if (tabName === 'aircraft') hasFilter = hasFilter || s.catFilter !== 0 || s.regCountryFilter !== '';
+            if (tabName === 'aircraft') hasFilter = hasFilter || s.catFilter.size > 0 || s.regCountryFilter !== '';
             if (!hasFilter) continue;
             if (!planePassesFilter(plane, tabName, s.items, s.direction)) return false;
         }
@@ -627,35 +729,52 @@
         return true;
     }
 
-    // ── Filter hook: patch PlaneObject.prototype.isFiltered ──────────────────
+    // ── Filter function (shared logic used by both hook methods) ─────────────
+    function rfIsFiltered(plane) {
+        if (!isFilterActive()) return false;
+        if (settings.inView && !plane.inView) return true;
+        return !planePassesAllFilters(plane, null);
+    }
+
+    // ── Filter hook: use tar1090's customFilter API + patch isFiltered ────────
     function installFilterHook() {
+        // Method 1: window.customFilter — the supported tar1090 filter API.
+        // tar1090 calls this for each plane every render cycle.
+        var origCustom = window.customFilter;
+        window.customFilter = function (plane) {
+            if (typeof origCustom === 'function' && origCustom(plane)) return true;
+            return rfIsFiltered(plane);
+        };
+
+        // Method 2: patch PlaneObject.prototype.isFiltered as a fallback for
+        // tar1090 versions that check this directly.
         try {
-            if (typeof PlaneObject === 'undefined') return false;
+            if (typeof PlaneObject === 'undefined') return true;
             var _orig = PlaneObject.prototype.isFiltered;
             PlaneObject.prototype.isFiltered = function () {
                 if (_orig && _orig.call(this)) return true;
-                if (!isFilterActive()) return false;
-                // When inView is on and a filter is active, also hide out-of-view planes
-                if (settings.inView && !this.inView) return true;
-                return !planePassesAllFilters(this, null);
+                return rfIsFiltered(this);
             };
-            return true;
         } catch (e) {
             console.warn('[routes-filter] could not patch isFiltered:', e);
-            return false;
         }
+        return true;
     }
 
     // ── Redraw trigger ────────────────────────────────────────────────────────
     function triggerRedraw() {
         try {
             if (typeof refreshFilter === 'function') { refreshFilter(); return; }
+            if (typeof window.refreshFilter === 'function') { window.refreshFilter(); return; }
             if (gReady()) {
                 for (var i = 0; i < g.planesOrdered.length; i++) {
                     var p = g.planesOrdered[i];
+                    var filtered = rfIsFiltered(p);
+                    if (filtered && typeof p.clearMarker === 'function') p.clearMarker();
                     if (typeof p.updateMarker === 'function') p.updateMarker(true);
                 }
             }
+            if (g && g.map && typeof g.map.render === 'function') g.map.render();
         } catch (e) {}
     }
 
@@ -676,7 +795,7 @@
         for (var i = 0; i < tabs.length; i++) {
             var tabName = tabs[i];
             var s = state.tabState[tabName];
-            var acExtra = tabName === 'aircraft' && (s.catFilter !== 0 || s.regCountryFilter !== '');
+            var acExtra = tabName === 'aircraft' && (s.catFilter.size > 0 || s.regCountryFilter !== '');
             if (s.items.size === 0 && !acExtra) continue;
 
             var items = Array.from(s.items);
@@ -685,10 +804,10 @@
                 var acParts = [];
                 if (items.length > 2) acParts.push(items.length + ' types');
                 else if (items.length > 0) acParts.push(items.join(', '));
-                if (s.catFilter !== 0) {
-                    var cInfo = CATEGORY_INFO[s.catFilter];
+                s.catFilter.forEach(function(catId) {
+                    var cInfo = CATEGORY_INFO[catId];
                     acParts.push(cInfo.emoji + ' ' + cInfo.label);
-                }
+                });
                 if (s.regCountryFilter !== '') {
                     var rcIso2 = _allRegCountries.get(s.regCountryFilter);
                     acParts.push((rcIso2 ? flagFromIso(rcIso2) + ' ' : '') + s.regCountryFilter);
@@ -1100,6 +1219,264 @@
         }
     }
 
+    // ── Summary tab rendering ─────────────────────────────────────────────────
+    function buildSummaryPanel() {
+        buildBreadcrumb();
+        var searchEl = document.getElementById('rf-search');
+        if (searchEl) searchEl.style.display = 'none';
+        var ctrlEl = document.getElementById('rf-controls');
+        if (ctrlEl) ctrlEl.innerHTML = '';
+        var hdrEl = document.getElementById('rf-colheader');
+        if (hdrEl) hdrEl.innerHTML = '';
+        var listEl = document.getElementById('rf-list');
+        if (!listEl) return;
+
+        if (!gReady()) {
+            listEl.innerHTML = '<div class="rf-empty">Waiting for aircraft data\u2026</div>';
+            return;
+        }
+
+        var planes  = g.planesOrdered;
+        var total   = planes.length;
+        var altBands = [0, 0, 0, 0, 0, 0, 0]; // ground, <5k, 5-10k, 10-20k, 20-30k, 30-40k, 40k+
+        var militaryList  = [];
+        var emergencyList = [];
+        var unusualList   = [];
+        var operatorCounts = {};
+        var routeCounts    = {};
+
+        // Receiver position - try tar1090 globals
+        var rxLat = null, rxLon = null;
+        try {
+            if (typeof SiteLat !== 'undefined' && typeof SiteLon !== 'undefined' && SiteLat && SiteLon) {
+                rxLat = +SiteLat; rxLon = +SiteLon;
+            } else if (typeof g !== 'undefined' && g.SitePosition && g.SitePosition.lat) {
+                rxLat = g.SitePosition.lat; rxLon = g.SitePosition.lng;
+            }
+        } catch (e) {}
+
+        var closestPlanes = [];
+
+        for (var i = 0; i < planes.length; i++) {
+            var p = planes[i];
+
+            // Altitude
+            var isGround = p.alt_baro === 'ground';
+            var altNum   = isGround ? -1 : (typeof p.alt_baro === 'number' ? p.alt_baro : null);
+            if (altNum !== null) {
+                if (isGround || altNum < 0)   altBands[0]++;
+                else if (altNum < 5000)        altBands[1]++;
+                else if (altNum < 10000)       altBands[2]++;
+                else if (altNum < 20000)       altBands[3]++;
+                else if (altNum < 30000)       altBands[4]++;
+                else if (altNum < 40000)       altBands[5]++;
+                else                           altBands[6]++;
+            }
+
+            // Military
+            if (isMilitaryAircraft(p)) militaryList.push(p);
+
+            // Emergency squawks
+            if (p.squawk === '7500' || p.squawk === '7600' || p.squawk === '7700') emergencyList.push(p);
+
+            // Unusual: very low fixed-wing (not helicopter, not ground)
+            if (!isGround && altNum !== null && altNum > 0 && altNum < 1000 && typeof p.lat === 'number') {
+                var cat = getAircraftCategory(p.typeLong || p.icaoType);
+                if (cat !== 5) unusualList.push({ plane: p, reason: 'Very low (' + Math.round(altNum) + ' ft)' });
+            }
+
+            // Operator counts
+            var cEntry = getCacheEntry(p);
+            if (cEntry && cEntry.airline_code) {
+                var opName = getAirlineName(cEntry.airline_code);
+                if (opName && opName !== cEntry.airline_code) {
+                    operatorCounts[opName] = (operatorCounts[opName] || 0) + 1;
+                }
+            }
+
+            // Route counts
+            var route = parseRoute(p);
+            if (route && route.fromIcao && route.toIcao) {
+                var rk = route.fromIcao + ' \u2013 ' + route.toIcao;
+                routeCounts[rk] = (routeCounts[rk] || 0) + 1;
+            }
+
+            // Closest aircraft (needs known position)
+            if (rxLat !== null && typeof p.lat === 'number' && typeof p.lon === 'number') {
+                closestPlanes.push({ plane: p, dist: haversineNm(rxLat, rxLon, p.lat, p.lon) });
+            }
+        }
+
+        if (closestPlanes.length) {
+            closestPlanes.sort(function (a, b) { return a.dist - b.dist; });
+            closestPlanes = closestPlanes.slice(0, 5);
+        }
+
+        var topOps    = Object.keys(operatorCounts).map(function(k){ return [k, operatorCounts[k]]; })
+                               .sort(function(a,b){ return b[1]-a[1]; }).slice(0, 6);
+        var topRoutes = Object.keys(routeCounts).map(function(k){ return [k, routeCounts[k]]; })
+                               .sort(function(a,b){ return b[1]-a[1]; }).slice(0, 6);
+        var altMax    = Math.max.apply(null, altBands.concat([1]));
+
+        function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+        function planeName(q) { return esc(q.flight || q.name || q.icao || '?'); }
+        function planeReg(q)  { return esc(q.registration || ''); }
+        function planeType(q) { return esc(q.typeLong || q.icaoType || ''); }
+        function altStr(q) {
+            if (q.alt_baro === 'ground') return 'Ground';
+            if (typeof q.alt_baro === 'number') return q.alt_baro.toLocaleString() + '\u2009ft';
+            return '';
+        }
+
+        var html = '<div class="rf-summary-content">';
+
+        // Overview
+        var onGround = altBands[0];
+        var airborne = total - onGround;
+        html += '<div class="rf-sum-section">';
+        html += '<div class="rf-sum-title">Overview</div>';
+        html += '<div class="rf-sum-overview">';
+        html += '<div class="rf-sum-stat"><div class="rf-sum-num">' + total + '</div><div class="rf-sum-label">total aircraft</div></div>';
+        html += '<div class="rf-sum-stat"><div class="rf-sum-num">' + airborne + '</div><div class="rf-sum-label">airborne</div></div>';
+        html += '<div class="rf-sum-stat"><div class="rf-sum-num">' + onGround + '</div><div class="rf-sum-label">on ground</div></div>';
+        if (militaryList.length > 0) {
+            html += '<div class="rf-sum-stat rf-sum-stat-mil"><div class="rf-sum-num">' + militaryList.length + '</div><div class="rf-sum-label">military</div></div>';
+        }
+        if (emergencyList.length > 0) {
+            html += '<div class="rf-sum-stat rf-sum-stat-emg"><div class="rf-sum-num">' + emergencyList.length + '</div><div class="rf-sum-label">emergency</div></div>';
+        }
+        html += '</div>';
+        html += '</div>';
+
+        // Altitude distribution
+        var altLabels = ['Ground', '<5k', '5-10k', '10-20k', '20-30k', '30-40k', '40k+'];
+        var altColors = ['#888888', '#7ce8c8', '#7cb9e8', '#7c8fe8', '#a87ce8', '#e87c7c', '#e8a87c'];
+        html += '<div class="rf-sum-section">';
+        html += '<div class="rf-sum-title">Altitude Distribution</div>';
+        html += '<div class="rf-sum-altbars">';
+        for (var bi = 0; bi < 7; bi++) {
+            var pct = altBands[bi] > 0 ? Math.max(4, Math.round(altBands[bi] / altMax * 100)) : 0;
+            html += '<div class="rf-sum-altbar-col">' +
+                '<div class="rf-sum-altbar-wrap"><div class="rf-sum-altbar-fill" style="height:' + pct + '%;background:' + altColors[bi] + '"></div></div>' +
+                '<div class="rf-sum-altbar-cnt">' + (altBands[bi] > 0 ? altBands[bi] : '') + '</div>' +
+                '<div class="rf-sum-altbar-lbl">' + altLabels[bi] + '</div>' +
+                '</div>';
+        }
+        html += '</div>';
+        html += '</div>';
+
+        // Attention required
+        var hasAttn = emergencyList.length > 0 || unusualList.length > 0 || militaryList.length > 0;
+        html += '<div class="rf-sum-section">';
+        html += '<div class="rf-sum-title">Attention</div>';
+        if (!hasAttn) {
+            html += '<div class="rf-sum-none">Nothing unusual right now.</div>';
+        } else {
+            // Emergency squawks first
+            emergencyList.forEach(function (q) {
+                var sq = q.squawk;
+                var desc = sq === '7500' ? 'Hijack declared' : sq === '7600' ? 'Radio failure' : 'General emergency';
+                html += '<div class="rf-sum-attn-row rf-sum-attn-emg">' +
+                    '<span class="rf-sum-squawk">SQWK ' + sq + '</span>' +
+                    ' <span class="rf-sum-aname">' + planeName(q) + '</span>' +
+                    (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
+                    ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
+                    ' <span class="rf-sum-altbadge">' + altStr(q) + '</span>' +
+                    ' <span class="rf-sum-attn-desc">' + desc + '</span>' +
+                    '</div>';
+            });
+            // Military
+            militaryList.slice(0, 8).forEach(function (q) {
+                html += '<div class="rf-sum-attn-row rf-sum-attn-mil">' +
+                    '<span class="rf-sum-mil-badge">MIL</span>' +
+                    ' <span class="rf-sum-aname">' + planeName(q) + '</span>' +
+                    (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
+                    ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
+                    ' <span class="rf-sum-altbadge">' + altStr(q) + '</span>' +
+                    '</div>';
+            });
+            if (militaryList.length > 8) {
+                html += '<div class="rf-sum-more">and ' + (militaryList.length - 8) + ' more military</div>';
+            }
+            // Very low aircraft
+            unusualList.slice(0, 4).forEach(function (item) {
+                var q = item.plane;
+                html += '<div class="rf-sum-attn-row">' +
+                    '<span class="rf-sum-low-badge">LOW</span>' +
+                    ' <span class="rf-sum-aname">' + planeName(q) + '</span>' +
+                    (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
+                    ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
+                    ' <span class="rf-sum-attn-desc">' + esc(item.reason) + '</span>' +
+                    '</div>';
+            });
+        }
+        html += '</div>';
+
+        // Closest aircraft (only if we have receiver position)
+        if (closestPlanes.length > 0) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Closest Aircraft</div>';
+            closestPlanes.forEach(function (item) {
+                var q = item.plane;
+                html += '<div class="rf-sum-close-row">' +
+                    '<span class="rf-sum-dist">' + item.dist.toFixed(0) + '\u2009nm</span>' +
+                    ' <span class="rf-sum-aname">' + planeName(q) + '</span>' +
+                    (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
+                    ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
+                    ' <span class="rf-sum-altbadge">' + altStr(q) + '</span>' +
+                    (typeof q.gs === 'number' ? ' <span class="rf-sum-speed">' + Math.round(q.gs) + '\u2009kt</span>' : '') +
+                    '</div>';
+            });
+            html += '</div>';
+        }
+
+        // Busiest operators
+        if (topOps.length > 0) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Busiest Operators</div>';
+            html += '<div class="rf-sum-bar-list">';
+            var opMax = topOps[0][1] || 1;
+            topOps.forEach(function (op) {
+                var w = Math.round(op[1] / opMax * 100);
+                html += '<div class="rf-sum-bar-row">' +
+                    '<div class="rf-sum-bar-label">' + esc(op[0]) + '</div>' +
+                    '<div class="rf-sum-bar-track"><div class="rf-sum-bar-fill" style="width:' + w + '%"></div></div>' +
+                    '<div class="rf-sum-bar-cnt">' + op[1] + '</div>' +
+                    '</div>';
+            });
+            html += '</div>';
+            html += '</div>';
+        }
+
+        // Busiest routes
+        if (topRoutes.length > 0) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Busiest Routes</div>';
+            html += '<div class="rf-sum-bar-list">';
+            var rtMax = topRoutes[0][1] || 1;
+            topRoutes.forEach(function (rt) {
+                var w = Math.round(rt[1] / rtMax * 100);
+                html += '<div class="rf-sum-bar-row">' +
+                    '<div class="rf-sum-bar-label">' + esc(rt[0]) + '</div>' +
+                    '<div class="rf-sum-bar-track"><div class="rf-sum-bar-fill rf-sum-bar-fill-route" style="width:' + w + '%"></div></div>' +
+                    '<div class="rf-sum-bar-cnt">' + rt[1] + '</div>' +
+                    '</div>';
+            });
+            html += '</div>';
+            html += '</div>';
+        }
+
+        html += '<div class="rf-sum-footer">Refreshes every 3s. Filters active on other tabs do not affect this view.</div>';
+        html += '</div>';
+
+        listEl.innerHTML = html;
+
+        var statusEl = document.getElementById('rf-status');
+        if (statusEl) statusEl.textContent = total + ' aircraft';
+        var btn = document.getElementById('rf-btn');
+        if (btn) btn.className = 'button ' + (isFilterActive() ? 'activeButton' : 'inActiveButton');
+    }
+
     // ── Settings tab rendering ────────────────────────────────────────────────
     function buildSettingsPanel() {
         buildBreadcrumb();
@@ -1113,92 +1490,110 @@
         if (listEl) {
             listEl.innerHTML =
                 '<div class="rf-settings-content">' +
-                '<div class="rf-setting-section-title">Display</div>' +
-                '<div class="rf-setting-row">' +
-                '<label class="rf-setting-label">' +
-                '<input type="checkbox" class="rf-setting-check" id="rf-inview-toggle"' +
-                (settings.inView ? ' checked' : '') +
-                ' onchange="window._rfSetInView(this.checked)"> ' +
-                'Only include aircraft in map view' +
+
+                // ── Intro ─────────────────────────────────────────────────────
+                '<div class="rf-set-intro">' +
+                '<p>tar1090 is a web-based aircraft tracking interface that decodes ADS-B transponder signals and plots them on a live map. ' +
+                'This version adds <strong>Robs Filters</strong> on top: a panel that lets you narrow down what is shown on the map by airport, country, operator, aircraft type, or distance. ' +
+                'The <strong><a class="rf-set-link" onclick="window._rfSwitchTab(\'summary\')">Summary tab</a></strong> interprets the live data \u2014 aircraft counts, altitude bands, military contacts, emergency squawks, and busiest routes \u2014 rather than just displaying it.' +
+                '</p>' +
+                '<p style="margin:0">This panel is still beta. Things may break. Filters work by patching tar1090\'s internal <code>isFiltered</code> function and are re-evaluated on every data refresh.</p>' +
+                '</div>' +
+
+                '<div class="rf-set-divider"></div>' +
+
+                // ── Filter behaviour ──────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Filter Behaviour</div>' +
+                '<label class="rf-set-toggle">' +
+                '<input type="checkbox" id="rf-inview-toggle"' + (settings.inView ? ' checked' : '') + ' onchange="window._rfSetInView(this.checked)">' +
+                '<div class="rf-set-toggle-body">' +
+                '<div class="rf-set-toggle-label">Only show aircraft in map view</div>' +
+                '<div class="rf-set-toggle-desc">When on, filter lists and the map filter only consider aircraft currently visible in the viewport.</div>' +
+                '</div>' +
                 '</label>' +
-                '<div class="rf-setting-desc">Panel lists and map filter only consider aircraft currently visible in the map viewport.</div>' +
                 '</div>' +
-                '<div class="rf-setting-divider"></div>' +
-                '<div class="rf-setting-section-title">Panel Mode</div>' +
-                '<div class="rf-setting-row">' +
-                '<div style="display:flex;flex-direction:column;gap:6px">' +
-                '<label class="rf-setting-label"><input type="radio" name="rf-display-mode" value="popup"' + (settings.displayMode !== 'sidebar' ? ' checked' : '') + ' onchange="window._rfSetDisplayMode(\'popup\')"> Popup (floating)</label>' +
-                '<label class="rf-setting-label"><input type="radio" name="rf-display-mode" value="sidebar"' + (settings.displayMode === 'sidebar' ? ' checked' : '') + ' onchange="window._rfSetDisplayMode(\'sidebar\')"> Sidebar (full height)</label>' +
+
+                '<div class="rf-set-divider"></div>' +
+
+                // ── Panel layout ──────────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Panel Layout</div>' +
+                '<div class="rf-set-radio-group">' +
+                '<label class="rf-set-radio"><input type="radio" name="rf-display-mode" value="popup"' + (settings.displayMode !== 'sidebar' ? ' checked' : '') + ' onchange="window._rfSetDisplayMode(\'popup\')"><span>Popup</span><span class="rf-set-radio-desc">Floats over the map, draggable</span></label>' +
+                '<label class="rf-set-radio"><input type="radio" name="rf-display-mode" value="sidebar"' + (settings.displayMode === 'sidebar' ? ' checked' : '') + ' onchange="window._rfSetDisplayMode(\'sidebar\')"><span>Sidebar</span><span class="rf-set-radio-desc">Docks alongside tar1090\'s info panel</span></label>' +
                 '</div>' +
-                '<div class="rf-setting-desc">Popup floats over the map and can be dragged. Sidebar docks full height to the edge of the screen.</div>' +
                 '</div>' +
-                (settings.displayMode === 'sidebar' ?
-                '<div class="rf-setting-row">' +
-                '<div class="rf-setting-desc" style="padding-left:0;margin-bottom:4px">Side</div>' +
-                '<div style="display:flex;gap:16px">' +
-                '<label class="rf-setting-label"><input type="radio" name="rf-sidebar-side" value="left"' + (settings.sidebarSide === 'left' ? ' checked' : '') + ' onchange="window._rfSetSidebarSide(\'left\')"> Left</label>' +
-                '<label class="rf-setting-label"><input type="radio" name="rf-sidebar-side" value="right"' + (settings.sidebarSide !== 'left' ? ' checked' : '') + ' onchange="window._rfSetSidebarSide(\'right\')"> Right</label>' +
+
+                '<div class="rf-set-divider"></div>' +
+
+                // ── Data sources ──────────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Data Sources</div>' +
+                '<label class="rf-set-toggle">' +
+                '<input type="checkbox"' + (settings.useLocalDb ? ' checked' : '') + ' onchange="window._rfSetUseLocalDb(this.checked)">' +
+                '<div class="rf-set-toggle-body">' +
+                '<div class="rf-set-toggle-label">Use local databases</div>' +
+                '<div class="rf-set-toggle-desc">Downloads airports, airlines and routes from community databases once per 24h. ' +
+                'Sources: OurAirports, VRS Standing Data. Reduces live API calls and enriches filter data.</div>' +
                 '</div>' +
-                '</div>' : '') +
-                '<div class="rf-setting-divider"></div>' +
-                '<div class="rf-setting-section-title">Visible Tabs</div>' +
-                '<div class="rf-setting-desc" style="margin-bottom:8px">Choose which tabs appear in the panel. Settings are saved automatically.</div>' +
+                '</label>' +
+                dbStatusHtml() +
+                '</div>' +
+
+                '<div class="rf-set-divider"></div>' +
+
+                // ── Visible tabs ──────────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Visible Tabs</div>' +
+                '<div class="rf-set-group-desc">Hide tabs you do not use. Changes take effect immediately.</div>' +
+                '<div class="rf-set-tabs-grid">' +
                 [
-                    ['airports',  'Airports'],
-                    ['countries', 'Countries'],
-                    ['operators', 'Operators'],
-                    ['aircraft',  'Aircraft'],
-                    ['alerts',    'Alerts'],
-                    ['distance',  'Distance'],
-                ].map(function(t) {
-                    return '<div class="rf-setting-row" style="margin-bottom:6px">' +
-                        '<label class="rf-setting-label">' +
-                        '<input type="checkbox" class="rf-setting-check"' +
-                        (_tabVisibility[t[0]] ? ' checked' : '') +
-                        ' onchange="window._rfSetTabVisible(\'' + t[0] + '\',this.checked)"> ' +
-                        t[1] + '</label></div>';
+                    ['summary',   'Summary',   'Insights and overview'],
+                    ['airports',  'Airports',  'Filter by departure/arrival airport'],
+                    ['countries', 'Countries', 'Filter by origin/destination country'],
+                    ['operators', 'Operators', 'Filter by airline or operator'],
+                    ['aircraft',  'Aircraft',  'Filter by type or category'],
+                    ['alerts',    'Alerts',    'Plane alert database matches'],
+                    ['distance',  'Distance',  'Filter by distance from a point'],
+                ].map(function (t) {
+                    return '<label class="rf-set-tabvis">' +
+                        '<input type="checkbox"' + (_tabVisibility[t[0]] ? ' checked' : '') + ' onchange="window._rfSetTabVisible(\'' + t[0] + '\',this.checked)">' +
+                        '<div><div class="rf-set-tabvis-name">' + t[1] + '</div><div class="rf-set-tabvis-desc">' + t[2] + '</div></div>' +
+                        '</label>';
                 }).join('') +
-                '<div class="rf-setting-divider"></div>' +
-                '<div class="rf-setting-section-title">Alerts Database</div>' +
-                '<div class="rf-setting-row">' +
-                '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
-                '<button class="rf-cat-btn" onclick="window._rfAlertsRefresh()">Refresh Now</button>' +
-                '<span class="rf-setting-desc" style="margin:0">' + (_alertsTimestamp ? 'Last updated: ' + new Date(_alertsTimestamp).toLocaleString() : 'Not yet loaded') + '</span>' +
                 '</div>' +
                 '</div>' +
-                '<div class="rf-setting-divider"></div>' +
-                '<div class="rf-setting-section-title">About</div>' +
-                '<div class="rf-about">' +
-                '<div class="rf-about-title">Robs Filters <span style="font-size:11px;font-weight:normal;background:#7a3300;color:#ffb366;padding:2px 7px;border-radius:3px;margin-left:6px;vertical-align:middle">BETA</span></div>' +
-                '<div style="background:#1a0a0a;border:1px solid #7a3300;color:#ffb366;padding:8px 10px;border-radius:4px;font-size:12px;margin-bottom:10px">' +
+
+                '<div class="rf-set-divider"></div>' +
+
+                // ── Alerts database ───────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Alerts Database</div>' +
+                '<div class="rf-set-group-desc">' + (_alertsTimestamp ? 'Last updated: ' + new Date(_alertsTimestamp).toLocaleString() : 'Not yet loaded') + '</div>' +
+                '<button class="rf-cat-btn" style="margin-top:6px" onclick="window._rfAlertsRefresh()">Refresh Now</button>' +
+                '</div>' +
+
+                '<div class="rf-set-divider"></div>' +
+
+                // ── About ─────────────────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">About <span class="rf-beta-badge">BETA</span></div>' +
+                '<div class="rf-set-about-warn">' +
                 '<strong>Work in progress</strong> \u2014 use at your own risk.<br>' +
-                '<strong>Known issues:</strong><ul style="margin:4px 0 0 16px;padding:0">' +
-                '<li>Alerts tab filtering (campaign/category/tag) has known bugs</li>' +
-                '<li>Distance filter zone saving has rough edges</li>' +
-                '<li>Cross-tab state can occasionally desync after rapid tab switching</li>' +
-                '</ul></div>' +
-                '<div class="rf-about-body" style="font-size:12px;line-height:1.6">' +
+                'Known issues: alerts tab filtering has bugs; distance zone saving is rough; cross-tab state can desync after rapid switching.' +
+                '</div>' +
+                '<div style="font-size:11px;color:#aaa;line-height:1.7;margin-top:8px">' +
                 'Filters are <strong>AND-ed across tabs</strong> and <strong>OR-ed within a tab</strong>. ' +
-                'Active filters appear as chips in the breadcrumb bar and are applied live to the map by patching tar1090\'s internal <code>isFiltered</code> function.' +
+                'Active filters appear as chips in the breadcrumb bar above the tabs.' +
                 '</div>' +
-                '<div class="rf-setting-divider" style="margin:10px 0"></div>' +
-                '<div style="font-size:12px;line-height:1.8">' +
-                '<strong>Airports</strong> \u2014 uses <code>plane.routeString</code> and <code>g.route_cache</code> for departure/arrival ICAO codes and full airport names. Requires <code>TAR1090_USEROUTEAPI=true</code>.<br>' +
-                '<strong>Countries</strong> \u2014 derives country from the route cache <code>countryiso2</code> field, falling back to a built-in ICAO airport prefix table (e.g. EG\u2192UK, LF\u2192France).<br>' +
-                '<strong>Operators</strong> \u2014 reads <code>g.route_cache[callsign].airline_code</code> (3-letter ICAO code) and resolves to full airline name via built-in lookup table.<br>' +
-                '<strong>Aircraft</strong> \u2014 uses <code>plane.typeLong</code> / <code>plane.icaoType</code> for type, <code>plane.category</code> (ADS-B emitter) and <code>plane.wtc</code> (wake turbulence) for category classification. Registration country is derived from the aircraft\'s ICAO 24-bit hex address using ICAO allocation ranges \u2014 no callsign needed.<br>' +
-                '<strong>Alerts</strong> \u2014 fetches plane-alert-db CSV from GitHub, cached 24h in localStorage. Matches live aircraft by <code>plane.icao</code> hex.<br>' +
-                '<strong>Distance</strong> \u2014 uses <code>plane.lat</code> / <code>plane.lon</code> with the Haversine formula (great-circle distance in nm). Optional altitude band uses <code>plane.alt_baro</code>. Zones saved to localStorage.' +
-                '</div>' +
-                '<div class="rf-setting-divider" style="margin:10px 0"></div>' +
-                '<div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">' +
-                '<a href="https://github.com/robertcanavan/tar1090-robs-filters" target="_blank" ' +
-                'style="display:inline-block;padding:5px 12px;background:#0d2b0d;border:1px solid #00ff41;color:#00ff41;text-decoration:none;border-radius:3px;font-size:12px">&#128279; GitHub &amp; Full Docs</a>' +
-                '<a href="https://github.com/robertcanavan/tar1090-robs-filters/issues" target="_blank" ' +
-                'style="display:inline-block;padding:5px 12px;background:#0d2b0d;border:1px solid #00ff41;color:#00ff41;text-decoration:none;border-radius:3px;font-size:12px">&#x26a0; Report an Issue</a>' +
+                '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' +
+                '<a href="https://github.com/robertcanavan/tar1090-robs-filters" target="_blank" class="rf-set-link-btn">&#128279; GitHub</a>' +
+                '<a href="https://github.com/robertcanavan/tar1090-robs-filters/issues" target="_blank" class="rf-set-link-btn">&#x26a0; Report Issue</a>' +
                 '</div>' +
                 '<div class="rf-about-made">Made by Rob \u2014 solving problems that are entirely his own fault, one tab at a time.</div>' +
                 '</div>' +
+
                 '</div>';
         }
         var statusEl = document.getElementById('rf-status');
@@ -1245,15 +1640,15 @@
             listEl.innerHTML =
                 '<div class="rf-dist-content">' +
 
-                '<div class="rf-setting-section-title">Location</div>' +
+                '<div id="rf-dist-map" class="rf-dist-map"></div>' +
 
                 '<div class="rf-dist-row">' +
-                '<select id="rf-dist-locsel" class="rf-dist-select" onchange="window._rfDistSelectLoc(this.value)">' +
-                locOpts +
-                '</select>' +
-                (_distanceLocations.length > 0
-                    ? '<button class="rf-cat-btn rf-dist-delbtn" onclick="window._rfDistDeleteLoc()">Delete</button>'
-                    : '') +
+                '<span id="rf-dist-coords" class="rf-dist-coords">' +
+                ((_distanceForm.lat && _distanceForm.lon)
+                    ? parseFloat(_distanceForm.lat).toFixed(5) + ', ' + parseFloat(_distanceForm.lon).toFixed(5)
+                    : 'Click the map to set a centre point') +
+                '</span>' +
+                '<button class="rf-cat-btn rf-dist-savebtn" onclick="window._rfDistUseCurrent()">Use map centre</button>' +
                 '</div>' +
 
                 '<div class="rf-dist-row">' +
@@ -1264,23 +1659,24 @@
                 '</div>' +
 
                 '<div class="rf-dist-row">' +
-                '<label class="rf-dist-label">Lat</label>' +
-                '<input id="rf-dist-lat" class="rf-dist-input rf-dist-coord" type="number" step="0.0001" placeholder="51.5074"' +
-                ' value="' + _distanceForm.lat + '"' +
-                ' oninput="window._rfDistFormUpdate(\'lat\',this.value)">' +
-                '<label class="rf-dist-label rf-dist-label-lon">Lon</label>' +
-                '<input id="rf-dist-lon" class="rf-dist-input rf-dist-coord" type="number" step="0.0001" placeholder="-0.1278"' +
-                ' value="' + _distanceForm.lon + '"' +
-                ' oninput="window._rfDistFormUpdate(\'lon\',this.value)">' +
-                '</div>' +
-
-                '<div class="rf-dist-row">' +
                 '<label class="rf-dist-label">Radius</label>' +
                 '<input id="rf-dist-radius" class="rf-dist-input rf-dist-small" type="number" min="1" max="9999"' +
                 ' value="' + _distanceForm.radiusNm + '"' +
-                ' oninput="window._rfDistFormUpdate(\'radiusNm\',this.value)">' +
+                ' oninput="window._rfDistRadiusChanged(this.value)">' +
                 '<span class="rf-dist-unit">NM</span>' +
-                '<button class="rf-cat-btn rf-dist-savebtn" onclick="window._rfDistSaveLoc()">Save Location</button>' +
+                (_distanceLocations.length > 0 || (_distanceForm.lat && _distanceForm.lon)
+                    ? '<button class="rf-cat-btn rf-dist-savebtn" onclick="window._rfDistSaveLoc()">Save</button>'
+                    : '') +
+                '</div>' +
+
+                '<div class="rf-setting-section-title" style="margin-top:6px">Saved Locations</div>' +
+                '<div class="rf-dist-row">' +
+                '<select id="rf-dist-locsel" class="rf-dist-select" onchange="window._rfDistSelectLoc(this.value)">' +
+                locOpts +
+                '</select>' +
+                (_distanceLocations.length > 0
+                    ? '<button class="rf-cat-btn rf-dist-delbtn" onclick="window._rfDistDeleteLoc()">Delete</button>'
+                    : '') +
                 '</div>' +
 
                 '<div class="rf-setting-divider"></div>' +
@@ -1327,6 +1723,9 @@
                     : '') +
 
                 '</div>';
+
+            // Initialise Leaflet map after DOM update
+            setTimeout(function() { _rfInitDistMap(); }, 0);
         }
 
         var statusEl = document.getElementById('rf-status');
@@ -1349,6 +1748,12 @@
     // ── Panel rendering ───────────────────────────────────────────────────────
     function buildPanel() {
         var tab = state.activeTab;
+
+        // Summary tab: separate rendering path
+        if (tab === 'summary') {
+            buildSummaryPanel();
+            return;
+        }
 
         // Settings tab: separate rendering path
         if (tab === 'settings') {
@@ -1398,20 +1803,24 @@
             } else if (tab === 'aircraft') {
                 // Category filter row: All + one button per category
                 var catHtml = '<div class="rf-cat-filter">';
-                catHtml += '<button class="rf-cat-btn' + (cur.catFilter === 0 ? ' rf-cat-active' : '') +
+                catHtml += '<button class="rf-cat-btn' + (cur.catFilter.size === 0 ? ' rf-cat-active' : '') +
                     '" onclick="window._rfSetAircraftCat(0)">All</button>';
                 [1,2,3,4,5,6,7].forEach(function (catId) {
                     var info = CATEGORY_INFO[catId];
-                    var active = cur.catFilter === catId ? ' rf-cat-active' : '';
+                    var active = cur.catFilter.has(catId) ? ' rf-cat-active' : '';
+                    var cnt = _catCounts[catId] || 0;
+                    var cntStr = cnt > 0 ? ' <span class="rf-cat-count">' + cnt + '</span>' : '';
                     catHtml += '<button class="rf-cat-btn' + active +
                         '" onclick="window._rfSetAircraftCat(' + catId + ')">' +
-                        info.emoji + ' ' + info.label + '</button>';
+                        info.emoji + ' ' + info.label + cntStr + '</button>';
                 });
                 catHtml += '</div>';
-                if (cur.catFilter !== 0) {
-                    var cInfo = CATEGORY_INFO[cur.catFilter];
-                    catHtml += '<button class="rf-cat-select-all" onclick="window._rfSelectAircraftCat(' + cur.catFilter + ')">' +
-                        'Select All ' + cInfo.label + 's</button>';
+                if (cur.catFilter.size > 0) {
+                    cur.catFilter.forEach(function(catId) {
+                        var cInfo = CATEGORY_INFO[catId];
+                        catHtml += '<button class="rf-cat-select-all" onclick="window._rfSelectAircraftCat(' + catId + ')">' +
+                            'Select All ' + cInfo.label + 's</button>';
+                    });
                 }
                 // Country dropdown
                 if (_allRegCountries.size > 0) {
@@ -1444,7 +1853,14 @@
         var allEntries = [];
         dataMap.forEach(function (v, k) {
             // Aircraft tab: optionally filter by selected category
-            if (tab === 'aircraft' && cur.catFilter !== 0 && getAircraftCategory(k) !== cur.catFilter) return;
+            if (tab === 'aircraft' && cur.catFilter.size > 0) {
+                var kPass = true;
+                cur.catFilter.forEach(function(catId) {
+                    if (catId === 6) { if (!_militaryTypeKeys.has(k)) kPass = false; }
+                    else { if (getAircraftCategory(k) !== catId) kPass = false; }
+                });
+                if (!kPass) return;
+            }
             if (!search) { allEntries.push([k, v]); return; }
             if (k.toLowerCase().includes(search)) { allEntries.push([k, v]); return; }
             if (tab === 'airports'  && (_airportLabels.get(k) || '').toLowerCase().includes(search)) { allEntries.push([k, v]); return; }
@@ -1638,14 +2054,22 @@
     };
 
     window._rfSetAircraftCat = function (catId) {
-        state.tabState.aircraft.catFilter = catId;
+        var cf = state.tabState.aircraft.catFilter;
+        if (catId === 0) {
+            cf.clear();
+        } else if (cf.has(catId)) {
+            cf.delete(catId);
+        } else {
+            cf.add(catId);
+        }
         buildPanel();
     };
 
     window._rfSelectAircraftCat = function (catId) {
         var data = getAircraftData();
         data.aircraft.forEach(function (count, key) {
-            if (getAircraftCategory(key) === catId) state.tabState.aircraft.items.add(key);
+            var match = catId === 6 ? _militaryTypeKeys.has(key) : getAircraftCategory(key) === catId;
+            if (match) state.tabState.aircraft.items.add(key);
         });
         applyFilter();
         buildPanel();
@@ -1677,26 +2101,348 @@
         applyPanelMode();
     };
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Local Database (airports / airlines / routes from external CSV sources)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Minimal RFC 4180 CSV line parser
+    function _dbParseLine(line) {
+        var fields = [], cur = '', inQ = false;
+        for (var i = 0; i < line.length; i++) {
+            var c = line[i];
+            if (c === '"') { inQ = !inQ; }
+            else if (c === ',' && !inQ) { fields.push(cur); cur = ''; }
+            else { cur += c; }
+        }
+        fields.push(cur);
+        return fields;
+    }
+
+    function _dbNeedSync(tsKey) {
+        try { return (Date.now() - parseInt(localStorage.getItem(tsKey) || '0', 10)) > DB_SYNC_MS; }
+        catch(e) { return true; }
+    }
+
+    // ── Airports (OurAirports) ────────────────────────────────────────────────
+    function _dbLoadAirports() {
+        try {
+            var raw = localStorage.getItem(DB_KEY_AIRPORTS);
+            if (!raw) return;
+            _localDb.airports = JSON.parse(raw);
+            _localDb.st.airports.count = Object.keys(_localDb.airports).length;
+            _localDb.st.airports.ts    = parseInt(localStorage.getItem(DB_KEY_AIRPORTS_TS) || '0', 10);
+        } catch(e) { _localDb.airports = null; }
+    }
+
+    function _dbFetchAirports() {
+        if (_localDb.st.airports.busy) return;
+        _localDb.st.airports.busy = true;
+        _localDb.st.airports.err  = null;
+        if (state.panelOpen && state.activeTab === 'settings') buildPanel();
+        fetch(DB_AIRPORTS_URL)
+            .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+            .then(function(text) {
+                // OurAirports columns: 0=id 1=ident 2=type 3=name 8=iso_country
+                var lines = text.split('\n'), db = {};
+                for (var i = 1; i < lines.length; i++) {
+                    var f = _dbParseLine(lines[i]);
+                    if (f.length < 9) continue;
+                    var ident = f[1].trim(), type = f[2].trim();
+                    if (ident.length !== 4) continue;
+                    if (type === 'heliport' || type === 'closed') continue;
+                    db[ident.toUpperCase()] = { n: f[3].trim(), c: f[8].trim() };
+                }
+                _localDb.airports = db;
+                _localDb.st.airports.count = Object.keys(db).length;
+                _localDb.st.airports.ts    = Date.now();
+                try { localStorage.setItem(DB_KEY_AIRPORTS, JSON.stringify(db)); localStorage.setItem(DB_KEY_AIRPORTS_TS, String(Date.now())); } catch(e) {}
+            })
+            .catch(function(e) { _localDb.st.airports.err = e.message; })
+            .finally(function() {
+                _localDb.st.airports.busy = false;
+                if (state.panelOpen && state.activeTab === 'settings') buildPanel();
+            });
+    }
+
+    function _dbGetAirportName(icao) {
+        if (!icao || !_localDb.airports) return null;
+        var a = _localDb.airports[icao.toUpperCase()];
+        return a ? a.n : null;
+    }
+    function _dbGetAirportIso2(icao) {
+        if (!icao || !_localDb.airports) return null;
+        var a = _localDb.airports[icao.toUpperCase()];
+        return a ? a.c : null;
+    }
+
+    // ── Airlines (VRS Standing Data) ─────────────────────────────────────────
+    function _dbLoadAirlines() {
+        try {
+            var raw = localStorage.getItem(DB_KEY_AIRLINES);
+            if (!raw) return;
+            _localDb.airlines = JSON.parse(raw);
+            _localDb.st.airlines.count = Object.keys(_localDb.airlines).length;
+            _localDb.st.airlines.ts    = parseInt(localStorage.getItem(DB_KEY_AIRLINES_TS) || '0', 10);
+        } catch(e) { _localDb.airlines = null; }
+    }
+
+    function _dbFetchAirlines() {
+        if (_localDb.st.airlines.busy) return;
+        _localDb.st.airlines.busy = true;
+        _localDb.st.airlines.err  = null;
+        if (state.panelOpen && state.activeTab === 'settings') buildPanel();
+        fetch(DB_AIRLINES_URL)
+            .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+            .then(function(text) {
+                // VRS airlines: 0=Code 1=Name 2=ICAO 3=IATA ...
+                var lines = text.split('\n'), db = {};
+                for (var i = 1; i < lines.length; i++) {
+                    var f = _dbParseLine(lines[i]);
+                    if (f.length < 2) continue;
+                    var icaoCode = (f[2] || '').trim().toUpperCase();
+                    var name     = (f[1] || '').trim();
+                    if (icaoCode.length >= 2 && name) db[icaoCode] = name;
+                }
+                _localDb.airlines = db;
+                _localDb.st.airlines.count = Object.keys(db).length;
+                _localDb.st.airlines.ts    = Date.now();
+                try { localStorage.setItem(DB_KEY_AIRLINES, JSON.stringify(db)); localStorage.setItem(DB_KEY_AIRLINES_TS, String(Date.now())); } catch(e) {}
+            })
+            .catch(function(e) { _localDb.st.airlines.err = e.message; })
+            .finally(function() {
+                _localDb.st.airlines.busy = false;
+                if (state.panelOpen && state.activeTab === 'settings') buildPanel();
+            });
+    }
+
+    // ── Routes (VRS Standing Data - lazy loaded per airline) ─────────────────
+    function _dbFetchRoutesForAirline(airlineCode) {
+        var code = airlineCode.toUpperCase();
+        if (_localDb.routesFetched[code] || _localDb.routesFetching[code]) return;
+        // Check localStorage cache first
+        try {
+            var cached = localStorage.getItem(DB_KEY_ROUTES_PFX + code);
+            var cachedTs = parseInt(localStorage.getItem(DB_KEY_ROUTES_PFX + code + '_ts') || '0', 10);
+            if (cached && (Date.now() - cachedTs) < DB_SYNC_MS) {
+                Object.assign(_localDb.routes, JSON.parse(cached));
+                _localDb.routesFetched[code] = true;
+                if (state.panelOpen) buildPanel();
+                return;
+            }
+        } catch(e) {}
+        _localDb.routesFetching[code] = true;
+        var url = DB_ROUTES_URL.replace('{P}', code[0]).replace('{CODE}', code);
+        fetch(url)
+            .then(function(r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+            .then(function(text) {
+                // VRS routes: 0=Callsign 1=Code 2=Number 3=AirlineCode 4=AirportCodes
+                var lines = text.split('\n'), routeMap = {};
+                for (var i = 1; i < lines.length; i++) {
+                    var f = _dbParseLine(lines[i]);
+                    if (f.length < 5) continue;
+                    var callsign = f[0].trim().toUpperCase();
+                    var aps = f[4].trim().split('-');
+                    if (aps.length >= 2 && callsign)
+                        routeMap[callsign] = { dep: aps[0].toUpperCase(), arr: aps[aps.length - 1].toUpperCase() };
+                }
+                Object.assign(_localDb.routes, routeMap);
+                _localDb.routesFetched[code] = true;
+                try { localStorage.setItem(DB_KEY_ROUTES_PFX + code, JSON.stringify(routeMap)); localStorage.setItem(DB_KEY_ROUTES_PFX + code + '_ts', String(Date.now())); } catch(e) {}
+                if (state.panelOpen) buildPanel();
+            })
+            .catch(function() { _localDb.routesFetched[code] = true; }) // 404 = no routes, don't retry
+            .finally(function() { delete _localDb.routesFetching[code]; });
+    }
+
+    function _dbGetRoute(plane) {
+        var cs = (plane.name || plane.flight || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (!cs) return null;
+        var entry = _localDb.routes[cs];
+        if (entry) {
+            return {
+                full:        entry.dep + ' - ' + entry.arr,
+                fromDisplay: _dbGetAirportName(entry.dep) || entry.dep,
+                toDisplay:   _dbGetAirportName(entry.arr) || entry.arr,
+                fromIcao:    entry.dep,
+                toIcao:      entry.arr,
+            };
+        }
+        // Trigger lazy fetch for this airline (first 3 alpha chars of callsign)
+        var prefix = cs.replace(/[^A-Z]/g, '').substring(0, 3);
+        if (prefix.length === 3) _dbFetchRoutesForAirline(prefix);
+        return null;
+    }
+
+    // ── Sync helpers ──────────────────────────────────────────────────────────
+    function _dbAutoSync() {
+        if (!settings.useLocalDb) return;
+        if (!_localDb.airports) _dbLoadAirports();
+        if (!_localDb.airports || _dbNeedSync(DB_KEY_AIRPORTS_TS)) _dbFetchAirports();
+        if (!_localDb.airlines) _dbLoadAirlines();
+        if (!_localDb.airlines || _dbNeedSync(DB_KEY_AIRLINES_TS)) _dbFetchAirlines();
+    }
+
+    window._rfSetUseLocalDb = function(on) {
+        settings.useLocalDb = !!on;
+        saveSettings();
+        if (settings.useLocalDb) _dbAutoSync();
+        buildPanel();
+    };
+    window._rfDbSyncAirports = function() { _dbFetchAirports(); };
+    window._rfDbSyncAirlines = function() { _dbFetchAirlines(); };
+    window._rfDbClearRoutes  = function() {
+        _localDb.routes = {};
+        _localDb.routesFetched = {};
+        try {
+            var rem = [];
+            for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); if (k && k.startsWith(DB_KEY_ROUTES_PFX)) rem.push(k); }
+            rem.forEach(function(k) { localStorage.removeItem(k); });
+        } catch(e) {}
+        buildPanel();
+    };
+
+    // Returns status HTML for the settings panel Local Databases section
+    function dbStatusHtml() {
+        if (!settings.useLocalDb) return '';
+        var ast = _localDb.st.airports, lst = _localDb.st.airlines;
+        var rCount = Object.keys(_localDb.routes).length;
+        var fmtTs = function(ts) { return ts ? new Date(ts).toLocaleString() : 'Never'; };
+        function dbRow(label, url, st, syncFn) {
+            var info = st.busy ? '<span style="color:#888">Downloading...</span>'
+                : st.err ? '<span style="color:#f66">Error: ' + st.err + '</span>'
+                : st.count ? st.count.toLocaleString() + ' entries'
+                : 'Not downloaded';
+            return '<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:5px 0;border-bottom:1px solid #222">' +
+                '<div style="flex:1;min-width:0">' +
+                '<div style="font-size:11px;color:#ccc">' + label + '</div>' +
+                '<div style="font-size:10px;color:#555;margin-top:1px"><a href="' + url + '" target="_blank" style="color:#555">' + url.replace('https://','').split('/').pop() + '</a></div>' +
+                '<div style="font-size:10px;color:#666;margin-top:1px">' + info + ' &bull; Last sync: ' + fmtTs(st.ts) + '</div>' +
+                '</div>' +
+                (st.busy ? '' : '<button class="rf-clear" style="padding:2px 8px;font-size:10px;margin-left:8px;flex-shrink:0" onclick="' + syncFn + '">Sync</button>') +
+                '</div>';
+        }
+        return '<div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;padding:6px 10px;margin-top:4px">' +
+            dbRow('Airports', DB_AIRPORTS_URL, ast, 'window._rfDbSyncAirports()') +
+            dbRow('Airlines', DB_AIRLINES_URL, lst, 'window._rfDbSyncAirlines()') +
+            '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0">' +
+            '<div><div style="font-size:11px;color:#ccc">Routes (lazy per-airline)</div>' +
+            '<div style="font-size:10px;color:#666;margin-top:1px">' + rCount.toLocaleString() + ' routes cached &bull; fetched on demand</div></div>' +
+            '<button class="rf-clear" style="padding:2px 8px;font-size:10px;margin-left:8px" onclick="window._rfDbClearRoutes()">Clear</button>' +
+            '</div>' +
+            '</div>';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+
     function saveSettings() {
         try {
             localStorage.setItem(SETTINGS_KEY, JSON.stringify({
                 inView:      settings.inView,
                 displayMode: settings.displayMode,
                 sidebarSide: settings.sidebarSide,
+                useLocalDb:  settings.useLocalDb,
             }));
         } catch (e) {}
+    }
+
+    // ── Sidebar position helpers ──────────────────────────────────────────────
+
+    // Position the RF panel flush to the right of tar1090's sidebar/infoblock.
+    // Called on first open and by observers whenever the reference elements change.
+    // The RF panel is NEVER hidden by this function - it always stays visible when open,
+    // it just repositions as the tar1090 sidebars show, hide, or resize.
+    function _rfPositionNextToSidebar() {
+        if (settings.displayMode !== 'sidebar') return;
+        var panel = document.getElementById('rf-panel');
+        if (!panel || !state.panelOpen) return;
+
+        panel.style.display = 'flex';
+
+        var sidebarEl = document.getElementById('sidebar_container');
+        var infoEl    = document.getElementById('selected_infoblock');
+        var vw        = window.innerWidth;
+        var panelW    = panel.offsetWidth || 400;
+
+        // Build a list of candidate left-side reference elements.
+        // Only count an element if it has real size AND its right edge leaves room
+        // for the RF panel - this prevents a full-width overlay from pushing us off-screen.
+        var leftPos = 0;
+        [sidebarEl, infoEl].forEach(function(el) {
+            if (!el) return;
+            var r = el.getBoundingClientRect();
+            // Must have visible size and not consume the whole viewport width
+            if (r.width < 10 || r.height < 10) return;
+            if (r.right > vw - 20) return; // element fills viewport - skip
+            if (r.right > leftPos) leftPos = r.right;
+        });
+
+        var layoutEl  = document.getElementById('layout_container');
+        var hdrEl     = document.getElementById('header_side');
+        var topOffset = layoutEl ? layoutEl.getBoundingClientRect().top
+                      : hdrEl   ? hdrEl.getBoundingClientRect().bottom
+                      : 0;
+        topOffset = Math.max(0, topOffset);
+
+        // Clamp so panel always stays within the viewport
+        leftPos = Math.min(leftPos, vw - panelW);
+        leftPos = Math.max(0, leftPos);
+
+        panel.style.top    = topOffset + 'px';
+        panel.style.left   = leftPos + 'px';
+        panel.style.right  = '';
+        panel.style.bottom = '0px';
+    }
+
+    function _rfDetachObservers() {
+        _rfObservers.forEach(function(ob) { try { ob.disconnect(); } catch(e) {} });
+        _rfObservers = [];
+    }
+
+    function _rfAttachObservers() {
+        _rfDetachObservers();
+        var targets = ['sidebar_container', 'selected_infoblock', 'layout_container']
+            .map(function(id) { return document.getElementById(id); })
+            .filter(Boolean);
+
+        targets.forEach(function(el) {
+            // Watch for size changes (sidebar resize handle dragging)
+            if (window.ResizeObserver) {
+                var ro = new ResizeObserver(_rfPositionNextToSidebar);
+                ro.observe(el);
+                _rfObservers.push(ro);
+            }
+            // Watch for style/class changes (show/hide)
+            var opts = { attributes: true, attributeFilter: ['style', 'class'] };
+            // Also watch layout_container for child additions/removals:
+            // selected_infoblock may be added/removed from DOM rather than just shown/hidden
+            if (el.id === 'layout_container') opts.childList = true;
+            var mo = new MutationObserver(_rfPositionNextToSidebar);
+            mo.observe(el, opts);
+            _rfObservers.push(mo);
+        });
+
+        // Reposition when the browser window is resized
+        window.addEventListener('resize', _rfPositionNextToSidebar);
+        _rfObservers.push({ disconnect: function() {
+            window.removeEventListener('resize', _rfPositionNextToSidebar);
+        }});
     }
 
     function applyPanelMode() {
         var panel = document.getElementById('rf-panel');
         if (!panel) return;
         panel.classList.remove('rf-sidebar', 'rf-sidebar-left', 'rf-sidebar-right');
+        // Clear all inline positions set by drag or previous mode
+        panel.style.left   = '';
+        panel.style.right  = '';
+        panel.style.top    = '';
+        panel.style.bottom = '';
+        _rfDetachObservers();
+
         if (settings.displayMode === 'sidebar') {
             panel.classList.add('rf-sidebar');
-            panel.classList.add(settings.sidebarSide === 'left' ? 'rf-sidebar-left' : 'rf-sidebar-right');
-            // Clear any positions left over from dragging
-            panel.style.left = '';
-            panel.style.top  = '';
+            _rfPositionNextToSidebar();
+            _rfAttachObservers();
         }
     }
 
@@ -1768,6 +2514,142 @@
 
     // ── Distance tab handlers ─────────────────────────────────────────────────
 
+    function _rfGetReceiverPos() {
+        try {
+            var c = g.map.getView().getCenter();
+            if (window.ol && ol.proj && ol.proj.toLonLat) {
+                var ll = ol.proj.toLonLat(c);
+                return { lat: ll[1], lon: ll[0] };
+            }
+            if (c && c.length >= 2) return { lat: c[1], lon: c[0] };
+        } catch(e) {}
+        try { if (typeof SiteLat !== 'undefined') return { lat: SiteLat, lon: SiteLon }; } catch(e) {}
+        return { lat: 53.07, lon: -0.77 };
+    }
+
+    function _rfLoadLeaflet(cb) {
+        if (window.L && _leafletReady) { cb(); return; }
+        var link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+        document.head.appendChild(link);
+        var s = document.createElement('script');
+        s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+        s.onload = function() {
+            _leafletReady = true;
+            // Fix icon paths so marker images load from CDN
+            if (window.L && L.Icon && L.Icon.Default) {
+                delete L.Icon.Default.prototype._getIconUrl;
+                L.Icon.Default.mergeOptions({
+                    iconUrl:       'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+                    iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+                    shadowUrl:     'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+                });
+            }
+            cb();
+        };
+        document.head.appendChild(s);
+    }
+
+    function _rfInitDistMap() {
+        if (!_leafletReady) {
+            _rfLoadLeaflet(function() { _rfInitDistMap(); });
+            return;
+        }
+        var container = document.getElementById('rf-dist-map');
+        if (!container) return;
+
+        // Destroy stale map if container was recreated
+        if (_distMap) {
+            try { _distMap.remove(); } catch(e) {}
+            _distMap = null; _distMapMarker = null; _distMapCircle = null;
+        }
+
+        // Starting centre: use saved form values or receiver position
+        var lat = parseFloat(_distanceForm.lat);
+        var lon = parseFloat(_distanceForm.lon);
+        if (isNaN(lat) || isNaN(lon)) {
+            var rp = _rfGetReceiverPos();
+            lat = rp.lat; lon = rp.lon;
+        }
+
+        _distMap = L.map(container, {
+            zoomControl:       true,
+            attributionControl: false,
+            scrollWheelZoom:   true,
+        }).setView([lat, lon], 8);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            subdomains: 'abc',
+        }).addTo(_distMap);
+
+        // Place marker + circle if we have valid coords
+        if (!isNaN(parseFloat(_distanceForm.lat))) {
+            _rfUpdateDistMapPin(lat, lon);
+        }
+
+        // Click → set centre point
+        _distMap.on('click', function(e) {
+            var clat = e.latlng.lat;
+            var clon = e.latlng.lng;
+            _distanceForm.lat = clat.toFixed(5);
+            _distanceForm.lon = clon.toFixed(5);
+            _rfUpdateDistMapPin(clat, clon);
+            // Update coordinate display
+            var coordEl = document.getElementById('rf-dist-coords');
+            if (coordEl) coordEl.textContent = clat.toFixed(5) + ', ' + clon.toFixed(5);
+        });
+    }
+
+    function _rfUpdateDistMapPin(lat, lon) {
+        if (!_distMap) return;
+        var radiusNm = parseFloat(_distanceForm.radiusNm) || 50;
+        var radiusM  = radiusNm * 1852;
+
+        if (_distMapMarker) {
+            _distMapMarker.setLatLng([lat, lon]);
+        } else {
+            _distMapMarker = L.circleMarker([lat, lon], {
+                radius:      7,
+                color:       '#fff',
+                fillColor:   '#00596b',
+                fillOpacity: 1,
+                weight:      2,
+            }).addTo(_distMap);
+        }
+
+        if (_distMapCircle) {
+            _distMapCircle.setLatLng([lat, lon]);
+            _distMapCircle.setRadius(radiusM);
+        } else {
+            _distMapCircle = L.circle([lat, lon], {
+                radius:      radiusM,
+                color:       '#00596b',
+                fillColor:   '#00596b',
+                fillOpacity: 0.08,
+                weight:      2,
+            }).addTo(_distMap);
+        }
+    }
+
+    window._rfDistRadiusChanged = function(val) {
+        _distanceForm.radiusNm = val;
+        if (_distMapCircle) {
+            var nm = parseFloat(val) || 50;
+            _distMapCircle.setRadius(nm * 1852);
+        }
+    };
+
+    window._rfDistUseCurrent = function () {
+        var rp = _rfGetReceiverPos();
+        _distanceForm.lat = rp.lat.toFixed(5);
+        _distanceForm.lon = rp.lon.toFixed(5);
+        _rfUpdateDistMapPin(rp.lat, rp.lon);
+        var coordEl = document.getElementById('rf-dist-coords');
+        if (coordEl) coordEl.textContent = _distanceForm.lat + ', ' + _distanceForm.lon;
+    };
+
     // Called by oninput on every form field -- keeps _distanceForm in sync without re-rendering
     window._rfDistFormUpdate = function (field, value) {
         _distanceForm[field] = value;
@@ -1830,27 +2712,25 @@
     };
 
     window._rfDistApply = function () {
-        // Always read from DOM - more reliable than _distanceForm for type=number inputs
-        var latEl    = document.getElementById('rf-dist-lat');
-        var lonEl    = document.getElementById('rf-dist-lon');
+        // Read radius and alt from DOM (still input fields), rest comes from _distanceForm
         var radiusEl = document.getElementById('rf-dist-radius');
         var nameEl   = document.getElementById('rf-dist-name');
         var altBtwEl = document.getElementById('rf-dist-alt-btw');
         var altMinEl = document.getElementById('rf-dist-alt-min');
         var altMaxEl = document.getElementById('rf-dist-alt-max');
-        if (latEl)    _distanceForm.lat          = latEl.value;
-        if (lonEl)    _distanceForm.lon          = lonEl.value;
         if (radiusEl) _distanceForm.radiusNm     = radiusEl.value;
         if (nameEl)   _distanceForm.locationName = nameEl.value;
         if (altBtwEl) _distanceForm.altMode      = altBtwEl.checked ? 'between' : 'all';
         if (altMinEl) _distanceForm.altMin       = altMinEl.value;
         if (altMaxEl) _distanceForm.altMax       = altMaxEl.value;
+
         var lat    = parseFloat(_distanceForm.lat);
         var lon    = parseFloat(_distanceForm.lon);
         var radius = parseFloat(_distanceForm.radiusNm);
-        if (isNaN(lat) || lat < -90 || lat > 90)   { alert('Enter a valid latitude (-90 to 90).'); return; }
-        if (isNaN(lon) || lon < -180 || lon > 180) { alert('Enter a valid longitude (-180 to 180).'); return; }
+        if (isNaN(lat) || lat < -90 || lat > 90)   { alert('Click the map to set a centre point first.'); return; }
+        if (isNaN(lon) || lon < -180 || lon > 180) { alert('Click the map to set a centre point first.'); return; }
         if (isNaN(radius) || radius < 1)           { alert('Enter a valid radius (minimum 1 NM).'); return; }
+
         _distanceFilter.lat          = lat;
         _distanceFilter.lon          = lon;
         _distanceFilter.radiusNm     = radius;
@@ -1861,6 +2741,8 @@
             _distanceFilter.altMax = parseInt(_distanceForm.altMax, 10) || 50000;
         }
         _distanceFilter.active = true;
+        console.log('[RF] Distance filter applied:', JSON.stringify(_distanceFilter));
+        console.log('[RF] isFilterActive:', isFilterActive(), '| customFilter:', typeof window.customFilter);
         applyFilter();
         buildPanel();
     };
@@ -1874,7 +2756,7 @@
     window._rfClearTab = function (tab) {
         state.tabState[tab].items.clear();
         if (tab === 'aircraft') {
-            state.tabState.aircraft.catFilter = 0;
+            state.tabState.aircraft.catFilter.clear();
             state.tabState.aircraft.regCountryFilter = '';
         }
         applyFilter();
@@ -1883,7 +2765,7 @@
 
     window._rfClear = function () {
         Object.values(state.tabState).forEach(function (s) { s.items.clear(); });
-        state.tabState.aircraft.catFilter = 0;
+        state.tabState.aircraft.catFilter.clear();
         state.tabState.aircraft.regCountryFilter = '';
         _alertsMapFilter      = false;
         _alertsMapFilterIcaos = null;
@@ -1969,7 +2851,8 @@
             '<div id="rf-breadcrumb" class="rf-breadcrumb" style="display:none"></div>',
             '<input id="rf-search" class="rf-search" type="text" placeholder="Search\u2026" oninput="window._rfOnSearch(this.value)">',
             '<div class="rf-tabs">',
-            '  <div id="rf-tab-airports"  class="rf-tab rf-tab-active" onclick="window._rfSwitchTab(\'airports\')">Airports</div>',
+            '  <div id="rf-tab-summary"   class="rf-tab rf-tab-active" onclick="window._rfSwitchTab(\'summary\')">Summary</div>',
+            '  <div id="rf-tab-airports"  class="rf-tab"               onclick="window._rfSwitchTab(\'airports\')">Airports</div>',
             '  <div id="rf-tab-countries" class="rf-tab"               onclick="window._rfSwitchTab(\'countries\')">Countries</div>',
             '  <div id="rf-tab-operators" class="rf-tab"               onclick="window._rfSwitchTab(\'operators\')">Operators</div>',
             '  <div id="rf-tab-aircraft"  class="rf-tab"               onclick="window._rfSwitchTab(\'aircraft\')">Aircraft</div>',
@@ -1992,8 +2875,9 @@
         // Load persisted settings
         try {
             var sv = localStorage.getItem(SETTINGS_KEY);
-            if (sv) { var sp = JSON.parse(sv); if (typeof sp.inView === 'boolean') settings.inView = sp.inView; if (sp.displayMode === 'sidebar') settings.displayMode = 'sidebar'; if (sp.sidebarSide === 'left') settings.sidebarSide = 'left'; }
+            if (sv) { var sp = JSON.parse(sv); if (typeof sp.inView === 'boolean') settings.inView = sp.inView; if (sp.displayMode === 'popup' || sp.displayMode === 'sidebar') settings.displayMode = sp.displayMode; if (sp.sidebarSide === 'left') settings.sidebarSide = 'left'; if (typeof sp.useLocalDb === 'boolean') settings.useLocalDb = sp.useLocalDb; }
             applyPanelMode();
+            if (settings.useLocalDb) _dbAutoSync();
         } catch (e) {}
         try {
             var tv = localStorage.getItem(TAB_VIS_KEY);
@@ -2025,7 +2909,7 @@
         // Re-wire _rfSwitchTab to update tab highlights
         var origSwitch = window._rfSwitchTab;
         window._rfSwitchTab = function (tab) {
-            ['airports','countries','operators','aircraft','alerts','distance','settings'].forEach(function (t) {
+            ['summary','airports','countries','operators','aircraft','alerts','distance','settings'].forEach(function (t) {
                 var el = document.getElementById('rf-tab-' + t);
                 if (el) el.className = 'rf-tab' + (t === 'settings' ? ' rf-tab-gear' : '') + (t === tab ? ' rf-tab-active' : '');
             });
@@ -2037,20 +2921,19 @@
                 // Distance panel: skip full rebuild when user has focus inside an input
                 // to prevent stealing the cursor every 3 seconds
                 if (state.activeTab === 'distance') {
-                    var focused = document.activeElement;
-                    var listEl  = document.getElementById('rf-list');
-                    if (focused && listEl && listEl.contains(focused)) {
-                        // Just update the status count, leave the form alone
-                        var statusEl2 = document.getElementById('rf-status');
-                        if (statusEl2 && _distanceFilter.active && gReady()) {
+                    // Never rebuild distance tab on timer - would destroy the Leaflet map
+                    // Only update the status count
+                    var statusEl2 = document.getElementById('rf-status');
+                    if (statusEl2 && gReady()) {
+                        if (_distanceFilter.active) {
                             var cnt2 = 0;
                             for (var ti = 0; ti < g.planesOrdered.length; ti++) {
                                 if (planePassesDistanceFilter(g.planesOrdered[ti])) cnt2++;
                             }
                             statusEl2.textContent = cnt2 + ' aircraft in zone';
+                        } else {
+                            statusEl2.textContent = '';
                         }
-                    } else {
-                        buildPanel();
                     }
                 } else {
                     buildPanel();

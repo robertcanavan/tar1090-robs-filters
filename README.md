@@ -60,7 +60,7 @@ If you hit a bug, raise an issue: [github.com/robertcanavan/tar1090-robs-filters
 Add the following to your tar1090 `docker-compose.yml` environment:
 
 ```yaml
-- TAR1090_CONFIGJS_APPEND=(function(){var b='https://raw.githubusercontent.com/robertcanavan/tar1090-robs-filters/main/';function load(){var l=document.createElement('link');l.rel='stylesheet';l.href=b+'robs-filter.css';document.head.appendChild(l);var s=document.createElement('script');s.src=b+'robs-filter.js';document.head.appendChild(s);}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',load):load();})();
+- TAR1090_CONFIGJS_APPEND=(function(){var b='https://cdn.jsdelivr.net/gh/robertcanavan/tar1090-robs-filters@main/';function load(){var l=document.createElement('link');l.rel='stylesheet';l.href=b+'robs-filter.css';document.head.appendChild(l);var s=document.createElement('script');s.src=b+'robs-filter.js';document.head.appendChild(s);}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',load):load();})();
 ```
 
 Then restart your container:

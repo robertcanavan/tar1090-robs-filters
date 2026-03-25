@@ -703,6 +703,103 @@
     line-height: 1.4;
 }
 
+/* Active zones pill list */
+.rf-dist-active-zone-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 4px;
+}
+
+.rf-dist-zone-pill {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(0,200,230,0.1);
+    border: 1px solid rgba(0,200,230,0.3);
+    border-radius: 12px;
+    padding: 2px 6px 2px 5px;
+    font-size: 11px;
+    color: #ccc;
+    max-width: 100%;
+}
+
+.rf-dist-zone-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.rf-dist-zone-pill-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 240px;
+}
+
+.rf-dist-pill-x {
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0 1px;
+    line-height: 1;
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+.rf-dist-pill-x:hover { color: #fff; opacity: 1; }
+
+/* Saved locations list */
+.rf-dist-saved-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 4px;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.rf-dist-saved-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 4px 6px;
+    border-radius: 3px;
+    background: var(--BGCOLOR2, #2a2a2a);
+    border: 1px solid #333;
+    transition: border-color 0.15s;
+}
+
+.rf-dist-saved-row.rf-dist-saved-active {
+    border-color: rgba(0,200,230,0.4);
+    background: rgba(0,200,230,0.06);
+}
+
+.rf-dist-saved-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.rf-dist-saved-name {
+    font-size: 12px;
+    color: #ddd;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.rf-dist-saved-detail {
+    font-size: 10px;
+    color: #666;
+    white-space: nowrap;
+}
+
 /* ── Summary tab ─────────────────────────────────────────────────────────── */
 .rf-summary-content {
     padding: 8px 4px 4px 4px;
@@ -766,58 +863,76 @@
     margin-top: 2px;
 }
 
-/* Altitude distribution bars */
-.rf-sum-altbars {
-    display: flex;
-    align-items: flex-end;
-    gap: 4px;
-    height: 70px;
-    padding-bottom: 24px;
-    position: relative;
-}
-
-.rf-sum-altbar-col {
-    flex: 1;
+/* Altitude distribution — horizontal bar chart */
+.rf-sum-altchart {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    height: 100%;
-    position: relative;
+    gap: 5px;
 }
 
-.rf-sum-altbar-wrap {
-    flex: 1;
-    width: 100%;
+.rf-sum-altrow {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
+    gap: 7px;
 }
 
-.rf-sum-altbar-fill {
-    width: 100%;
-    min-height: 0;
-    border-radius: 2px 2px 0 0;
-    transition: height 0.3s;
-}
-
-.rf-sum-altbar-cnt {
+.rf-sum-altrow-lbl {
+    width: 52px;
     font-size: 10px;
-    color: #aaa;
-    text-align: center;
-    line-height: 1.2;
-    margin-top: 2px;
-    min-height: 12px;
+    font-weight: 600;
+    text-align: right;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
-.rf-sum-altbar-lbl {
-    font-size: 9px;
-    color: #666;
-    text-align: center;
-    position: absolute;
-    bottom: 0;
-    left: 0; right: 0;
+.rf-sum-altrow-track {
+    flex: 1;
+    height: 20px;
+    background: #1a1a1a;
+    border-radius: 4px;
+    overflow: visible;
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.rf-sum-altrow-fill {
+    height: 100%;
+    border-radius: 4px;
+    min-width: 0;
+    transition: width 0.4s ease;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    position: relative;
+    flex-shrink: 0;
+}
+
+.rf-sum-altrow-inner {
+    font-size: 10px;
+    font-weight: bold;
+    color: rgba(0, 0, 0, 0.75);
+    padding-right: 5px;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: clip;
+    line-height: 1;
+}
+
+.rf-sum-altrow-outer {
+    font-size: 10px;
+    font-weight: bold;
+    color: #aaa;
+    padding-left: 5px;
+    white-space: nowrap;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.rf-sum-altrow-pct {
+    font-size: 10px;
+    color: #555;
+    width: 30px;
+    text-align: right;
+    flex-shrink: 0;
 }
 
 /* Attention / alert rows */
@@ -999,6 +1114,369 @@
     padding: 4px 0 2px 0;
     font-style: italic;
 }
+
+.rf-sum-footer-link {
+    color: var(--ACCENT, #00596b);
+    cursor: pointer;
+    text-decoration: underline;
+}
+.rf-sum-footer-link:hover { color: #00c8e6; }
+
+/* Summary scope segmented toggle (All aircraft | In map view) */
+.rf-sum-scope-wrap {
+    display: flex;
+    gap: 0;
+    padding: 5px 6px 4px;
+    border-bottom: 1px solid #222;
+}
+
+.rf-sum-scope-btn {
+    flex: 1;
+    padding: 5px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid #333;
+    background: #1a1a1a;
+    color: #555;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    letter-spacing: 0.2px;
+}
+
+.rf-sum-scope-btn:first-child {
+    border-radius: 4px 0 0 4px;
+    border-right: none;
+}
+
+.rf-sum-scope-btn:last-child {
+    border-radius: 0 4px 4px 0;
+}
+
+.rf-sum-scope-btn:hover {
+    background: #252525;
+    color: #aaa;
+}
+
+.rf-sum-scope-active {
+    background: var(--ACCENT, #00596b) !important;
+    color: #fff !important;
+    border-color: var(--ACCENT, #00596b) !important;
+}
+
+/* "in view" badge shown in the Overview section title */
+.rf-sum-scope-badge {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: bold;
+    color: var(--ACCENT, #00c8e6);
+    background: rgba(0, 89, 107, 0.2);
+    border: 1px solid var(--ACCENT, #00596b);
+    border-radius: 3px;
+    padding: 1px 5px;
+    margin-left: 5px;
+    vertical-align: middle;
+}
+
+/* Speed / High-flyer leader rows */
+.rf-sum-leader-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0;
+    border-bottom: 1px solid #2a2a2a;
+}
+.rf-sum-leader-row:last-child { border-bottom: none; }
+
+.rf-sum-leader-rank {
+    font-size: 13px;
+    font-weight: bold;
+    color: #444;
+    min-width: 14px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.rf-sum-leader-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.rf-sum-leader-name {
+    font-size: 11px;
+    color: #ddd;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 3px;
+}
+
+.rf-sum-leader-bar-wrap {
+    height: 4px;
+    background: #2a2a2a;
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.rf-sum-leader-bar {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s;
+}
+
+.rf-sum-leader-bar-spd  { background: #e8a87c; }
+.rf-sum-leader-bar-alt  { background: #a87ce8; }
+.rf-sum-leader-bar-slow { background: #7ce8b9; }
+
+.rf-sum-leader-val {
+    font-size: 11px;
+    font-weight: bold;
+    color: #aaa;
+    min-width: 56px;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+/* Aircraft types grid */
+.rf-sum-types-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.rf-sum-type-pill {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 3px;
+    padding: 3px 7px;
+}
+
+.rf-sum-type-code {
+    font-size: 11px;
+    font-weight: bold;
+    color: #ccc;
+    font-family: monospace;
+}
+
+.rf-sum-type-cnt {
+    font-size: 10px;
+    color: var(--ACCENT, #00596b);
+    font-weight: bold;
+}
+
+/* Tracking methods stat blocks */
+.rf-sum-methods {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.rf-sum-meth-item {
+    flex: 1;
+    min-width: 48px;
+    text-align: center;
+    border-radius: 4px;
+    padding: 5px 4px 4px;
+    border: 1px solid #333;
+    background: #1a1a1a;
+}
+
+.rf-sum-meth-cnt {
+    font-size: 18px;
+    font-weight: bold;
+    color: #fff;
+    line-height: 1.1;
+}
+
+.rf-sum-meth-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: #888;
+    margin-top: 1px;
+}
+
+.rf-sum-meth-pct {
+    font-size: 10px;
+    color: #555;
+    margin-top: 1px;
+}
+
+.rf-sum-meth-adsb  { border-color: #00596b; background: rgba(0,89,107,0.15); }
+.rf-sum-meth-adsb  .rf-sum-meth-cnt { color: var(--ACCENT, #00c8e6); }
+.rf-sum-meth-mlat  { border-color: #5a7a00; background: rgba(90,122,0,0.15); }
+.rf-sum-meth-mlat  .rf-sum-meth-cnt { color: #a0d830; }
+.rf-sum-meth-tisb  { border-color: #7a5a00; background: rgba(122,90,0,0.12); }
+.rf-sum-meth-tisb  .rf-sum-meth-cnt { color: #d8a830; }
+.rf-sum-meth-modes { border-color: #444; }
+.rf-sum-meth-modes .rf-sum-meth-cnt { color: #aaa; }
+.rf-sum-meth-other { border-color: #333; }
+.rf-sum-meth-other .rf-sum-meth-cnt { color: #666; }
+
+/* Range & coverage */
+.rf-sum-range-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.rf-sum-range-compass {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 2px solid #333;
+    background: #111;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.rf-sum-range-arrow {
+    font-size: 16px;
+    color: var(--ACCENT, #00c8e6);
+    display: inline-block;
+    line-height: 1;
+    transform-origin: center;
+}
+
+.rf-sum-range-info { flex: 1; }
+
+.rf-sum-range-dist {
+    font-size: 22px;
+    font-weight: bold;
+    color: #fff;
+    line-height: 1.1;
+}
+
+.rf-sum-range-unit {
+    font-size: 13px;
+    color: #888;
+    font-weight: normal;
+}
+
+.rf-sum-range-detail {
+    font-size: 11px;
+    color: #888;
+    margin-top: 2px;
+}
+
+/* Countries bar fill */
+.rf-sum-bar-fill-country {
+    background: #69d8a0;
+}
+
+/* Recent arrivals */
+.rf-sum-arrival-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 3px 0;
+    border-bottom: 1px solid #2a2a2a;
+    font-size: 12px;
+}
+.rf-sum-arrival-row:last-child { border-bottom: none; }
+
+.rf-sum-arrival-age {
+    font-size: 10px;
+    font-weight: bold;
+    color: #a0d830;
+    background: rgba(90,120,0,0.2);
+    border: 1px solid #5a7a00;
+    border-radius: 3px;
+    padding: 1px 5px;
+    flex-shrink: 0;
+    font-family: monospace;
+    min-width: 42px;
+    text-align: center;
+}
+
+/* Summary title sub-label */
+.rf-sum-title-sub {
+    font-size: 9px;
+    color: #555;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: normal;
+    margin-left: 4px;
+}
+
+/* Clickable plane rows on the summary tab */
+.rf-sum-plane-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 5px;
+    border-bottom: 1px solid #2a2a2a;
+    font-size: 12px;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: background 0.1s;
+}
+.rf-sum-plane-row:last-child { border-bottom: none; }
+.rf-sum-plane-row:hover { background: rgba(255,255,255,0.04); }
+
+/* Selected state — plane is in _sumFilter */
+.rf-sum-plane-sel,
+.rf-sum-leader-row.rf-sum-plane-sel {
+    background: rgba(0, 89, 107, 0.2) !important;
+    border-radius: 3px;
+    outline: 1px solid var(--ACCENT, #00596b);
+}
+
+/* Clickable leader rows */
+.rf-sum-leader-row {
+    cursor: pointer;
+    border-radius: 3px;
+    transition: background 0.1s;
+}
+.rf-sum-leader-row:hover { background: rgba(255,255,255,0.04); }
+
+/* Clickable altitude band rows */
+.rf-sum-altrow-clickable {
+    cursor: pointer;
+    border-radius: 3px;
+    transition: background 0.12s;
+}
+.rf-sum-altrow-clickable:hover { background: rgba(255,255,255,0.05); }
+.rf-sum-altrow-active {
+    background: rgba(0, 89, 107, 0.15);
+    outline: 1px solid var(--ACCENT, #00596b);
+    border-radius: 3px;
+}
+
+/* Attention section: clickable category header */
+.rf-sum-attn-hdr {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 4px 2px;
+    margin: 4px 0 2px;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: background 0.1s;
+}
+.rf-sum-attn-hdr:first-child { margin-top: 0; }
+.rf-sum-attn-hdr:hover { background: rgba(255,255,255,0.05); }
+
+.rf-sum-squawk-hdr {
+    font-size: 10px;
+    font-weight: bold;
+    color: #ff6666;
+}
+
+/* Inline text link in summary sections */
+.rf-sum-link {
+    color: var(--ACCENT, #00c8e6);
+    cursor: pointer;
+    text-decoration: underline;
+}
+.rf-sum-link:hover { color: #fff; }
 
 /* ── Redesigned Settings tab ─────────────────────────────────────────────── */
 /* Remove old settings styles and replace with new grouped design */

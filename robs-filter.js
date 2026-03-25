@@ -56,6 +56,37 @@
     var SETTINGS_KEY   = 'rf_settings_v1';
     var _tabVisibility = { summary: true, airports: true, countries: true, operators: true, aircraft: true, alerts: true, distance: true };
 
+    // ── Summary section visibility (persisted) ────────────────────────────────
+    var SUMMARY_SETTINGS_KEY = 'rf_sum_settings_v1';
+    var _summarySettings = {
+        altitude:      true,   // Altitude Distribution chart
+        attention:     true,   // Emergency / military / low-altitude alerts
+        closest:       true,   // Closest aircraft list
+        speed:         true,   // Speed leaders (fastest planes)
+        highflyers:    true,   // High flyers (highest altitude)
+        types:         true,   // Most common aircraft types
+        operators:     true,   // Busiest operators
+        routes:        true,   // Busiest routes
+        methods:       true,   // Tracking method breakdown (ADS-B / MLAT / etc.)
+        range:         true,   // Range & coverage (furthest aircraft)
+        arrivals:      true,   // Recent arrivals (appeared in last 5 min)
+        countries:     true,   // Countries visible (from registration prefix)
+        slowest:       true,   // Slowest airborne aircraft (> 30 kt)
+        defaultInView: false,  // Default scope: false = all aircraft, true = in map view
+    };
+
+    // Session-level summary scope toggle. Starts at the persisted default.
+    // Does NOT persist itself — resets to defaultInView on each page load.
+    var _summaryInView = false;
+
+    // Quick-filter set populated by clicking items on the Summary tab.
+    // When non-empty only these ICAOs are shown on the map.
+    var _sumFilter = new Set();
+
+    // Tracks first-seen timestamp per ICAO for "Recent Arrivals" section.
+    // {icao: timestampMs} — pruned each refresh to only include current planes.
+    var _sumArrivals = {};
+
     // ── Alerts state ──────────────────────────────────────────────────────────
     var _alertsDb        = null;  // null=not loaded, array when loaded
     var _alertsFetching  = false;
@@ -71,25 +102,20 @@
     var _alertsSelectedIcaos  = new Set();
 
     // ── Distance filter state ─────────────────────────────────────────────────
-    var _distMap = null;          // Leaflet map instance
-    var _distMapMarker = null;    // centre point marker
-    var _distMapCircle = null;    // radius circle
+    var _distMap = null;          // Leaflet map instance (mini-map in panel)
+    var _distMapMarker = null;    // centre point marker on mini-map
+    var _distMapCircle = null;    // radius circle on mini-map
     var _leafletReady = false;    // Leaflet loaded flag
 
+    var _distOLLayer  = null;     // OL vector layer drawn on the TAR1090 main map
+    var _distOLSource = null;     // vector source for that layer
+
     var DIST_LS_KEY        = 'rf_dist_locs_v1';
+    var DIST_ZONES_KEY     = 'rf_dist_zones_v2';      // persists active zones array
     var _distanceLocations = [];  // [{name, lat, lon, radiusNm}] persisted in localStorage
-    // Applied filter -- only changes when user hits Apply
-    var _distanceFilter  = {
-        active:       false,
-        locationIdx:  -1,
-        locationName: '',
-        lat:          null,
-        lon:          null,
-        radiusNm:     50,
-        altMode:      'all',  // 'all' or 'between'
-        altMin:       0,
-        altMax:       50000,
-    };
+    // Active zones array — multiple zones with OR logic
+    // Each zone: {lat, lon, radiusNm, name, altMode, altMin, altMax}
+    var _distanceZones     = [];
     // Form working state -- tracks what the user is currently typing
     // Used to repopulate the form on auto-refresh without wiping edits
     var _distanceForm = {
@@ -101,6 +127,7 @@
         altMode:      'all',
         altMin:       '0',
         altMax:       '50000',
+        mapZoom:      8,
     };
 
     // Shorthand helpers
@@ -110,7 +137,8 @@
         if (ac.catFilter.size > 0 || ac.regCountryFilter !== '') return true;
         if (_alertsSelectedIcaos.size > 0) return true;
         if (_alertsMapFilter && _alertsMapFilterIcaos) return true;
-        if (_distanceFilter.active) return true;
+        if (_distanceZones.length > 0) return true;
+        if (_sumFilter.size > 0) return true;
         return Object.values(state.tabState).some(function(s) { return s.items.size > 0; });
     }
 
@@ -234,6 +262,47 @@
         if (icao[0] === 'P' && icao.length === 4) return 'United States';
         if (icao[0] === 'C') return 'Canada';
         return PREFIX_COUNTRY[icao.substring(0, 2).toUpperCase()] || ('Other (' + icao.substring(0, 2).toUpperCase() + ')');
+    }
+
+    // Hardcoded country-name → ISO-3166-1 alpha-2 lookup.
+    // Covers all names produced by getCountryFromAirport() and _rfRegCountry().
+    const COUNTRY_ISO2_MAP = {
+        'United Kingdom':'GB','UK':'GB','Ireland':'IE','Netherlands':'NL','Belgium':'BE',
+        'Luxembourg':'LU','Germany':'DE','France':'FR','Spain':'ES','Portugal':'PT',
+        'Greece':'GR','Italy':'IT','Malta':'MT','Hungary':'HU','Austria':'AT',
+        'Czech Republic':'CZ','Czechia':'CZ','Slovakia':'SK','Poland':'PL','Croatia':'HR',
+        'Slovenia':'SI','Bulgaria':'BG','Romania':'RO','Serbia':'RS','Denmark':'DK',
+        'Norway':'NO','Sweden':'SE','Finland':'FI','Iceland':'IS','Latvia':'LV',
+        'Lithuania':'LT','Estonia':'EE','Ukraine':'UA','Belarus':'BY','Turkey':'TR',
+        'Israel':'IL','Cyprus':'CY','Russia':'RU','Saudi Arabia':'SA','UAE':'AE',
+        'Bahrain':'BH','Kuwait':'KW','Iran':'IR','Jordan':'JO','Syria':'SY',
+        'Lebanon':'LB','Yemen':'YE','Pakistan':'PK','Afghanistan':'AF','India':'IN',
+        'Nepal':'NP','Laos':'LA','Myanmar':'MM','Cambodia':'KH','Vietnam':'VN',
+        'Indonesia':'ID','Malaysia':'MY','Singapore':'SG','Thailand':'TH','Japan':'JP',
+        'South Korea':'KR','S. Korea':'KR','Taiwan':'TW','China':'CN','Australia':'AU',
+        'New Zealand':'NZ','South Africa':'ZA','S. Africa':'ZA','Botswana':'BW',
+        'Mozambique':'MZ','Malawi':'MW','Zimbabwe':'ZW','Cameroon':'CM','Angola':'AO',
+        'Ethiopia':'ET','Eritrea':'ER','Kenya':'KE','Sudan':'SD','Tanzania':'TZ',
+        'Uganda':'UG','Nigeria':'NG','Ghana':'GH','Ivory Coast':'CI','Morocco':'MA',
+        'Tunisia':'TN','Libya':'LY','Egypt':'EG','Canada':'CA','United States':'US',
+        'USA':'US','Mexico':'MX','Cuba':'CU','Dominican Republic':'DO','Jamaica':'JM',
+        'Brazil':'BR','Argentina':'AR','Chile':'CL','Peru':'PE','Ecuador':'EC',
+        'Colombia':'CO','Venezuela':'VE','Uruguay':'UY','Kazakhstan':'KZ',
+        'North Macedonia':'MK','Albania':'AL','Bosnia & Herzegovina':'BA',
+        'Switzerland':'CH','Namibia':'NA','Israel':'IL',
+    };
+
+    // Get ISO2 for a country name — tries dynamic DB map first, then hardcoded.
+    function _toIso2(name) {
+        if (!name) return '';
+        try { var v = _countryIso2.get(name); if (v) return v; } catch(e) {}
+        return COUNTRY_ISO2_MAP[name] || '';
+    }
+
+    // Flag emoji for an ICAO airport code (e.g. "EGLL" → 🇬🇧).
+    function airportFlag(icao) {
+        var iso2 = _toIso2(getCountryFromAirport(icao));
+        return iso2 ? flagFromIso(iso2) : '';
     }
 
     // ── Aircraft category lookup ──────────────────────────────────────────────
@@ -683,23 +752,114 @@
         return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    function planePassesDistanceFilter(plane) {
-        if (!_distanceFilter.active) return true;
-        if (_distanceFilter.lat === null || _distanceFilter.lon === null) return true;
-        // Accept lat/lon in any numeric form (number, numeric string)
-        var plat = +plane.lat;
-        var plon = +plane.lon;
-        if (isNaN(plat) || isNaN(plon)) return true; // no position known - show plane
-        var dist = haversineNm(_distanceFilter.lat, _distanceFilter.lon, plat, plon);
-        if (dist > _distanceFilter.radiusNm) return false;
-        if (_distanceFilter.altMode === 'between') {
-            var alt = typeof plane.altitude === 'number' ? plane.altitude
-                    : (plane.alt_baro === 'ground' ? 0
-                    : typeof plane.alt_baro === 'number' ? plane.alt_baro : null);
-            if (alt === null) return true; // unknown altitude - pass through
-            if (alt < _distanceFilter.altMin || alt > _distanceFilter.altMax) return false;
+    function _rfBearing(lat1, lon1, lat2, lon2) {
+        var dLon = (lon2 - lon1) * Math.PI / 180;
+        var la1  = lat1 * Math.PI / 180;
+        var la2  = lat2 * Math.PI / 180;
+        var y    = Math.sin(dLon) * Math.cos(la2);
+        var x    = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dLon);
+        return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    function _rfCardinal(deg) {
+        var dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+        return dirs[Math.round(deg / 22.5) % 16];
+    }
+
+    // Infer country name from aircraft registration prefix (ICAO standard prefixes).
+    // Falls back to a coarse ICAO hex block check when no registration is available.
+    function _rfRegCountry(reg, icao) {
+        if (reg) {
+            var r = reg.toUpperCase();
+            var pfx = [
+                ['G-','UK'],         ['D-','Germany'],    ['F-','France'],
+                ['I-','Italy'],      ['EC-','Spain'],     ['SE-','Sweden'],
+                ['PH-','Netherlands'],['OO-','Belgium'],  ['LN-','Norway'],
+                ['OY-','Denmark'],   ['EI-','Ireland'],   ['TF-','Iceland'],
+                ['SP-','Poland'],    ['OE-','Austria'],   ['HB-','Switzerland'],
+                ['OK-','Czechia'],   ['OM-','Slovakia'],  ['LX-','Luxembourg'],
+                ['SX-','Greece'],    ['HA-','Hungary'],   ['YR-','Romania'],
+                ['LZ-','Bulgaria'],  ['9A-','Croatia'],   ['S5-','Slovenia'],
+                ['9H-','Malta'],     ['LY-','Lithuania'], ['YL-','Latvia'],
+                ['ES-','Estonia'],   ['OH-','Finland'],   ['YU-','Serbia'],
+                ['RA-','Russia'],    ['EW-','Belarus'],   ['UP-','Kazakhstan'],
+                ['UR-','Ukraine'],   ['4X-','Israel'],    ['TC-','Turkey'],
+                ['A6-','UAE'],       ['HZ-','Saudi Arabia'],['9V-','Singapore'],
+                ['VH-','Australia'], ['ZK-','New Zealand'],['ZS-','S. Africa'],
+                ['JA','Japan'],      ['HL','S. Korea'],   ['B-','China'],
+                ['VT-','India'],     ['SU-','Egypt'],     ['ET-','Ethiopia'],
+                ['CN-','Morocco'],   ['5Y-','Kenya'],     ['AP-','Pakistan'],
+                ['VN-','Vietnam'],   ['HS-','Thailand'],
+                ['N','USA'],         ['C-','Canada'],     ['XA-','Mexico'],
+                ['CC-','Chile'],     ['PT-','Brazil'],    ['LV-','Argentina'],
+                ['PP-','Brazil'],
+            ];
+            for (var pi = 0; pi < pfx.length; pi++) {
+                if (r.indexOf(pfx[pi][0]) === 0) return pfx[pi][1];
+            }
         }
-        return true;
+        // ICAO hex block fallback for unregistered / no-reg aircraft
+        if (icao) {
+            var n = parseInt(icao, 16);
+            if (n >= 0x3C0000 && n <= 0x3FFFFF) return 'Germany';
+            if (n >= 0x400000 && n <= 0x43FFFF) return 'UK';
+            if (n >= 0x380000 && n <= 0x3BFFFF) return 'France';
+            if (n >= 0x340000 && n <= 0x37FFFF) return 'Spain';
+            if (n >= 0x300000 && n <= 0x33FFFF) return 'Italy';
+            if (n >= 0x4A0000 && n <= 0x4A7FFF) return 'Netherlands';
+            if (n >= 0x448000 && n <= 0x44FFFF) return 'Belgium';
+            if (n >= 0x4A8000 && n <= 0x4AFFFF) return 'Norway';
+            if (n >= 0x458000 && n <= 0x45FFFF) return 'Denmark';
+            if (n >= 0x480000 && n <= 0x487FFF) return 'Ireland';
+            if (n >= 0x4B0000 && n <= 0x4B7FFF) return 'Poland';
+            if (n >= 0x460000 && n <= 0x467FFF) return 'Finland';
+            if (n >= 0x440000 && n <= 0x447FFF) return 'Austria';
+            if (n >= 0x4C8000 && n <= 0x4CFFFF) return 'Switzerland';
+            if (n >= 0x488000 && n <= 0x48FFFF) return 'Iceland';
+            if (n >= 0x468000 && n <= 0x46FFFF) return 'Greece';
+            if (n >= 0x4B8000 && n <= 0x4BFFFF) return 'Portugal';
+            if (n >= 0x4C0000 && n <= 0x4C7FFF) return 'Romania';
+            if (n >= 0x450000 && n <= 0x457FFF) return 'Bulgaria';
+            if (n >= 0x470000 && n <= 0x477FFF) return 'Hungary';
+            if (n >= 0x478000 && n <= 0x47FFFF) return 'Croatia';
+            if (n >= 0x100000 && n <= 0x1FFFFF) return 'Russia';
+            if (n >= 0xA00000 && n <= 0xAFFFFF) return 'USA';
+            if (n >= 0xC00000 && n <= 0xC3FFFF) return 'Canada';
+            if (n >= 0x7C0000 && n <= 0x7FFFFF) return 'Australia';
+            if (n >= 0x800000 && n <= 0x83FFFF) return 'India';
+            if (n >= 0x680000 && n <= 0x6BFFFF) return 'Turkey';
+            if (n >= 0x898000 && n <= 0x8BFFFF) return 'Japan';
+        }
+        return null;
+    }
+
+    function planePassesDistanceFilter(plane) {
+        if (_distanceZones.length === 0) return true;
+        // tar1090 stores position as plane.position = [lon, lat] (OL convention).
+        // plane.lat / plane.lon do NOT exist on PlaneObject — always use .position.
+        var plat, plon;
+        if (plane.position && plane.position.length >= 2) {
+            plon = +plane.position[0];
+            plat = +plane.position[1];
+        } else {
+            plat = +plane.lat;
+            plon = +plane.lon;
+        }
+        if (isNaN(plat) || isNaN(plon)) return true; // no position — show plane
+        // Pass if within ANY active zone (OR logic)
+        for (var zi = 0; zi < _distanceZones.length; zi++) {
+            var zone = _distanceZones[zi];
+            var dist = haversineNm(zone.lat, zone.lon, plat, plon);
+            if (dist > zone.radiusNm) continue;
+            if (zone.altMode === 'between') {
+                var alt = typeof plane.altitude === 'number' ? plane.altitude
+                        : (plane.altitude === 'ground' ? 0
+                        : typeof plane.alt_baro === 'number' ? plane.alt_baro : null);
+                if (alt !== null && (alt < zone.altMin || alt > zone.altMax)) continue;
+            }
+            return true; // within this zone
+        }
+        return false; // outside all active zones
     }
 
     // ── Cross-tab filter helper ───────────────────────────────────────────────
@@ -726,6 +886,11 @@
         }
         // Distance filter
         if (excludeTab !== 'distance' && !planePassesDistanceFilter(plane)) return false;
+        // Summary quick-filter
+        if (_sumFilter.size > 0) {
+            var si = plane.icao ? plane.icao.toUpperCase() : '';
+            if (!_sumFilter.has(si)) return false;
+        }
         return true;
     }
 
@@ -763,22 +928,35 @@
 
     // ── Redraw trigger ────────────────────────────────────────────────────────
     function triggerRedraw() {
+        // refreshFilter() is tar1090's own filter refresh function.
+        // It calls refresh(true) → updateVisible() → plane.updateVisible() on each plane,
+        // which recalculates plane.visible = checkVisible() && !isFiltered().
+        // Our patched isFiltered is called there, then mapRefresh hides/shows markers.
         try {
-            if (typeof refreshFilter === 'function') { refreshFilter(); return; }
-            if (typeof window.refreshFilter === 'function') { window.refreshFilter(); return; }
-            if (gReady()) {
+            if (typeof refreshFilter === 'function') {
+                refreshFilter();
+            } else if (typeof window.refreshFilter === 'function') {
+                window.refreshFilter();
+            } else if (gReady()) {
+                // Fallback: manually call updateVisible + updateFeatures on each plane
+                if (typeof updateVisible === 'function') updateVisible();
                 for (var i = 0; i < g.planesOrdered.length; i++) {
                     var p = g.planesOrdered[i];
-                    var filtered = rfIsFiltered(p);
-                    if (filtered && typeof p.clearMarker === 'function') p.clearMarker();
-                    if (typeof p.updateMarker === 'function') p.updateMarker(true);
+                    if (typeof p.updateFeatures === 'function') p.updateFeatures(true);
                 }
             }
-            if (g && g.map && typeof g.map.render === 'function') g.map.render();
-        } catch (e) {}
+        } catch (e) { console.warn('[RF] triggerRedraw error:', e); }
     }
 
-    function applyFilter() { triggerRedraw(); }
+    function applyFilter() {
+        triggerRedraw();
+        // Keep the main-map ring in sync with the active filter state
+        if (_distanceZones.length > 0) {
+            _rfDrawDistOnMainMap();
+        } else {
+            _rfClearDistOnMainMap();
+        }
+    }
 
     // ── Breadcrumb generation ─────────────────────────────────────────────────
     var TAB_LABELS = {
@@ -870,17 +1048,29 @@
         }
 
         // Distance filter chip
-        if (_distanceFilter.active) {
-            var distActive = state.activeTab === 'distance' ? ' rf-chip-active' : '';
-            var distParts  = [(_distanceFilter.locationName || 'Custom') + ' ' + _distanceFilter.radiusNm + 'NM'];
-            if (_distanceFilter.altMode === 'between') {
-                distParts.push(_distanceFilter.altMin + '-' + _distanceFilter.altMax + 'ft');
-            }
+        if (_distanceZones.length > 0) {
+            var distActive  = state.activeTab === 'distance' ? ' rf-chip-active' : '';
+            var distSummary = _distanceZones.length === 1
+                ? (_distanceZones[0].name || 'Custom') + '\u00a0' + _distanceZones[0].radiusNm + 'NM'
+                : _distanceZones.length + ' zones';
             chips.push(
                 '<div class="rf-chip' + distActive + '" onclick="window._rfSwitchTab(\'distance\')" title="Click to open Distance tab">' +
                 '<span class="rf-chip-label">Distance</span>' +
-                '<span class="rf-chip-items">' + distParts.join(' | ').replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>' +
+                '<span class="rf-chip-items">' + distSummary.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>' +
                 '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfDistClear()">&#x2715;</button>' +
+                '</div>'
+            );
+        }
+
+        // Summary quick-filter chip
+        if (_sumFilter.size > 0) {
+            var sfActive = state.activeTab === 'summary' ? ' rf-chip-active' : '';
+            var sfLabel  = _sumFilter.size === 1 ? Array.from(_sumFilter)[0] : _sumFilter.size + ' selected';
+            chips.push(
+                '<div class="rf-chip' + sfActive + '" onclick="window._rfSwitchTab(\'summary\')" title="Click to return to Summary tab">' +
+                '<span class="rf-chip-label">Summary</span>' +
+                '<span class="rf-chip-items">' + sfLabel.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>' +
+                '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfClearSumFilter()">&#x2715;</button>' +
                 '</div>'
             );
         }
@@ -1224,10 +1414,21 @@
         buildBreadcrumb();
         var searchEl = document.getElementById('rf-search');
         if (searchEl) searchEl.style.display = 'none';
-        var ctrlEl = document.getElementById('rf-controls');
-        if (ctrlEl) ctrlEl.innerHTML = '';
         var hdrEl = document.getElementById('rf-colheader');
         if (hdrEl) hdrEl.innerHTML = '';
+
+        // ── Scope toggle in the controls bar ──────────────────────────────────
+        var ctrlEl = document.getElementById('rf-controls');
+        if (ctrlEl) {
+            ctrlEl.innerHTML =
+                '<div class="rf-sum-scope-wrap">' +
+                '<button class="rf-sum-scope-btn' + (!_summaryInView ? ' rf-sum-scope-active' : '') + '" ' +
+                    'onclick="window._rfSumToggleScope(false)" title="Include all aircraft currently being received">All aircraft</button>' +
+                '<button class="rf-sum-scope-btn' + (_summaryInView ? ' rf-sum-scope-active' : '') + '" ' +
+                    'onclick="window._rfSumToggleScope(true)" title="Only aircraft visible in the current map viewport">In map view</button>' +
+                '</div>';
+        }
+
         var listEl = document.getElementById('rf-list');
         if (!listEl) return;
 
@@ -1236,14 +1437,39 @@
             return;
         }
 
-        var planes  = g.planesOrdered;
+        // All planes are used for arrivals tracking (so moving in/out of view doesn't
+        // reset first-seen times). Statistics use the scope-filtered set.
+        var allPlanes = g.planesOrdered;
+        var nowMs     = Date.now();
+
+        // Update arrivals tracking on ALL planes regardless of scope
+        var currentIcaos = {};
+        for (var ci = 0; ci < allPlanes.length; ci++) {
+            currentIcaos[allPlanes[ci].icao] = true;
+            if (!_sumArrivals[allPlanes[ci].icao]) _sumArrivals[allPlanes[ci].icao] = nowMs;
+        }
+        Object.keys(_sumArrivals).forEach(function(ic) { if (!currentIcaos[ic]) delete _sumArrivals[ic]; });
+
+        // Apply scope filter
+        var planes = _summaryInView
+            ? allPlanes.filter(function(p) { return p.inView; })
+            : allPlanes;
+
         var total   = planes.length;
-        var altBands = [0, 0, 0, 0, 0, 0, 0]; // ground, <5k, 5-10k, 10-20k, 20-30k, 30-40k, 40k+
+        var altBands     = [0, 0, 0, 0, 0, 0, 0]; // ground, <5k, 5-10k, 10-20k, 20-30k, 30-40k, 40k+
+        var altBandIcaos = [[], [], [], [], [], [], []]; // ICAOs per band for click-to-filter
         var militaryList  = [];
         var emergencyList = [];
         var unusualList   = [];
         var operatorCounts = {};
         var routeCounts    = {};
+        var typeCounts     = {};
+        var speedList      = [];
+        var slowestList    = [];
+        var highList       = [];
+        var methodCounts   = { adsb: 0, mlat: 0, tisb: 0, modes: 0, other: 0 };
+        var countryCounts  = {};
+        var distList       = [];
 
         // Receiver position - try tar1090 globals
         var rxLat = null, rxLon = null;
@@ -1260,17 +1486,22 @@
         for (var i = 0; i < planes.length; i++) {
             var p = planes[i];
 
-            // Altitude
-            var isGround = p.alt_baro === 'ground';
-            var altNum   = isGround ? -1 : (typeof p.alt_baro === 'number' ? p.alt_baro : null);
+            // Altitude — tar1090 uses plane.altitude ('ground' string or number)
+            var isGround = p.altitude === 'ground' || p.alt_baro === 'ground';
+            var altNum   = isGround ? -1
+                         : (typeof p.altitude === 'number' ? p.altitude
+                         : (typeof p.alt_baro  === 'number' ? p.alt_baro : null));
             if (altNum !== null) {
-                if (isGround || altNum < 0)   altBands[0]++;
-                else if (altNum < 5000)        altBands[1]++;
-                else if (altNum < 10000)       altBands[2]++;
-                else if (altNum < 20000)       altBands[3]++;
-                else if (altNum < 30000)       altBands[4]++;
-                else if (altNum < 40000)       altBands[5]++;
-                else                           altBands[6]++;
+                var bi2;
+                if (isGround || altNum < 0)   bi2 = 0;
+                else if (altNum < 5000)        bi2 = 1;
+                else if (altNum < 10000)       bi2 = 2;
+                else if (altNum < 20000)       bi2 = 3;
+                else if (altNum < 30000)       bi2 = 4;
+                else if (altNum < 40000)       bi2 = 5;
+                else                           bi2 = 6;
+                altBands[bi2]++;
+                if (p.icao) altBandIcaos[bi2].push(p.icao.toUpperCase());
             }
 
             // Military
@@ -1280,7 +1511,8 @@
             if (p.squawk === '7500' || p.squawk === '7600' || p.squawk === '7700') emergencyList.push(p);
 
             // Unusual: very low fixed-wing (not helicopter, not ground)
-            if (!isGround && altNum !== null && altNum > 0 && altNum < 1000 && typeof p.lat === 'number') {
+            if (!isGround && altNum !== null && altNum > 0 && altNum < 1000 &&
+                    p.position && p.position.length >= 2) {
                 var cat = getAircraftCategory(p.typeLong || p.icaoType);
                 if (cat !== 5) unusualList.push({ plane: p, reason: 'Very low (' + Math.round(altNum) + ' ft)' });
             }
@@ -1301,9 +1533,43 @@
                 routeCounts[rk] = (routeCounts[rk] || 0) + 1;
             }
 
-            // Closest aircraft (needs known position)
-            if (rxLat !== null && typeof p.lat === 'number' && typeof p.lon === 'number') {
-                closestPlanes.push({ plane: p, dist: haversineNm(rxLat, rxLon, p.lat, p.lon) });
+            // Aircraft type counts
+            var tCode = p.icaoType || (p.typeLong ? p.typeLong.split(' ')[0] : null);
+            if (tCode) typeCounts[tCode] = (typeCounts[tCode] || 0) + 1;
+
+            // Speed leaders / slowest — ground speed (gs), airborne only
+            if (!isGround && typeof p.gs === 'number' && p.gs > 0) speedList.push(p);
+            // Slowest: airborne and actually moving (gs > 30 kt excludes parked/taxiing)
+            if (!isGround && typeof p.gs === 'number' && p.gs > 30) slowestList.push(p);
+
+            // High flyers
+            if (!isGround && typeof altNum === 'number' && altNum > 0) highList.push(p);
+
+            // Tracking method
+            var at = (p.addrtype || '').toLowerCase();
+            if (at.indexOf('adsb') === 0 || at.indexOf('adsr') === 0) methodCounts.adsb++;
+            else if (at === 'mlat')                                     methodCounts.mlat++;
+            else if (at.indexOf('tisb') === 0)                          methodCounts.tisb++;
+            else if (at === 'mode_s')                                   methodCounts.modes++;
+            else                                                        methodCounts.other++;
+
+            // Countries (registration prefix → ICAO hex fallback)
+            var ctry = _rfRegCountry(p.registration, p.icao);
+            if (ctry) countryCounts[ctry] = (countryCounts[ctry] || 0) + 1;
+
+            // Closest + furthest — use plane.position [lon, lat] (tar1090 convention)
+            if (rxLat !== null) {
+                var cLat, cLon;
+                if (p.position && p.position.length >= 2) {
+                    cLon = +p.position[0]; cLat = +p.position[1];
+                } else {
+                    cLat = +p.lat; cLon = +p.lon;
+                }
+                if (!isNaN(cLat) && !isNaN(cLon)) {
+                    var d = haversineNm(rxLat, rxLon, cLat, cLon);
+                    distList.push({ plane: p, dist: d, lat: cLat, lon: cLon });
+                    closestPlanes.push({ plane: p, dist: d });
+                }
             }
         }
 
@@ -1312,29 +1578,83 @@
             closestPlanes = closestPlanes.slice(0, 5);
         }
 
+        speedList.sort(function(a, b) { return b.gs - a.gs; });
+        speedList = speedList.slice(0, 5);
+
+        slowestList.sort(function(a, b) { return a.gs - b.gs; });
+        slowestList = slowestList.slice(0, 5);
+
+        highList.sort(function(a, b) {
+            var aA = typeof a.altitude === 'number' ? a.altitude : (typeof a.alt_baro === 'number' ? a.alt_baro : 0);
+            var bA = typeof b.altitude === 'number' ? b.altitude : (typeof b.alt_baro === 'number' ? b.alt_baro : 0);
+            return bA - aA;
+        });
+        highList = highList.slice(0, 5);
+
         var topOps    = Object.keys(operatorCounts).map(function(k){ return [k, operatorCounts[k]]; })
                                .sort(function(a,b){ return b[1]-a[1]; }).slice(0, 6);
         var topRoutes = Object.keys(routeCounts).map(function(k){ return [k, routeCounts[k]]; })
                                .sort(function(a,b){ return b[1]-a[1]; }).slice(0, 6);
+        var topTypes  = Object.keys(typeCounts).map(function(k){ return [k, typeCounts[k]]; })
+                               .sort(function(a,b){ return b[1]-a[1]; }).slice(0, 8);
+        var topCountries = Object.keys(countryCounts).map(function(k){ return [k, countryCounts[k]]; })
+                               .sort(function(a,b){ return b[1]-a[1]; }).slice(0, 8);
         var altMax    = Math.max.apply(null, altBands.concat([1]));
+
+        // Range: furthest aircraft with bearing
+        var furthestItem = null;
+        if (distList.length > 0) {
+            distList.sort(function(a, b) { return b.dist - a.dist; });
+            furthestItem = distList[0];
+        }
+
+        // Recent arrivals: first seen within last 5 minutes, sorted newest first
+        var ARRIVAL_WINDOW_MS = 5 * 60 * 1000;
+        var recentArrivals = planes.filter(function(p) {
+            var fs = _sumArrivals[p.icao];
+            return fs && (nowMs - fs) < ARRIVAL_WINDOW_MS;
+        }).sort(function(a, b) {
+            return (_sumArrivals[b.icao] || 0) - (_sumArrivals[a.icao] || 0);
+        }).slice(0, 8);
 
         function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
         function planeName(q) { return esc(q.flight || q.name || q.icao || '?'); }
         function planeReg(q)  { return esc(q.registration || ''); }
         function planeType(q) { return esc(q.typeLong || q.icaoType || ''); }
         function altStr(q) {
-            if (q.alt_baro === 'ground') return 'Ground';
+            if (q.altitude === 'ground' || q.alt_baro === 'ground') return 'Ground';
+            if (typeof q.altitude === 'number') return q.altitude.toLocaleString() + '\u2009ft';
             if (typeof q.alt_baro === 'number') return q.alt_baro.toLocaleString() + '\u2009ft';
             return '';
+        }
+        function altNum2(q) {
+            if (typeof q.altitude === 'number') return q.altitude;
+            if (typeof q.alt_baro === 'number') return q.alt_baro;
+            return 0;
+        }
+        // Renders a clickable plane row. selected = ICAO is in _sumFilter.
+        function planeRow(q, extraHtml) {
+            var ic   = (q.icao || '').toUpperCase();
+            var sel  = _sumFilter.size > 0 && _sumFilter.has(ic);
+            return '<div class="rf-sum-plane-row' + (sel ? ' rf-sum-plane-sel' : '') + '" ' +
+                'onclick="window._rfSumFilterIcao(\'' + ic + '\')" title="Click to filter to this aircraft">' +
+                extraHtml +
+                ' <span class="rf-sum-aname">' + planeName(q) + '</span>' +
+                (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
+                ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
+                ' <span class="rf-sum-altbadge">' + altStr(q) + '</span>' +
+                (typeof q.gs === 'number' ? ' <span class="rf-sum-speed">' + Math.round(q.gs) + '\u2009kt</span>' : '') +
+                '</div>';
         }
 
         var html = '<div class="rf-summary-content">';
 
-        // Overview
+        // ── Overview (always shown) ───────────────────────────────────────────────
         var onGround = altBands[0];
         var airborne = total - onGround;
         html += '<div class="rf-sum-section">';
-        html += '<div class="rf-sum-title">Overview</div>';
+        html += '<div class="rf-sum-title">Overview' +
+            (_summaryInView ? ' <span class="rf-sum-scope-badge">in view</span>' : '') + '</div>';
         html += '<div class="rf-sum-overview">';
         html += '<div class="rf-sum-stat"><div class="rf-sum-num">' + total + '</div><div class="rf-sum-label">total aircraft</div></div>';
         html += '<div class="rf-sum-stat"><div class="rf-sum-num">' + airborne + '</div><div class="rf-sum-label">airborne</div></div>';
@@ -1348,90 +1668,191 @@
         html += '</div>';
         html += '</div>';
 
-        // Altitude distribution
-        var altLabels = ['Ground', '<5k', '5-10k', '10-20k', '20-30k', '30-40k', '40k+'];
-        var altColors = ['#888888', '#7ce8c8', '#7cb9e8', '#7c8fe8', '#a87ce8', '#e87c7c', '#e8a87c'];
-        html += '<div class="rf-sum-section">';
-        html += '<div class="rf-sum-title">Altitude Distribution</div>';
-        html += '<div class="rf-sum-altbars">';
-        for (var bi = 0; bi < 7; bi++) {
-            var pct = altBands[bi] > 0 ? Math.max(4, Math.round(altBands[bi] / altMax * 100)) : 0;
-            html += '<div class="rf-sum-altbar-col">' +
-                '<div class="rf-sum-altbar-wrap"><div class="rf-sum-altbar-fill" style="height:' + pct + '%;background:' + altColors[bi] + '"></div></div>' +
-                '<div class="rf-sum-altbar-cnt">' + (altBands[bi] > 0 ? altBands[bi] : '') + '</div>' +
-                '<div class="rf-sum-altbar-lbl">' + altLabels[bi] + '</div>' +
-                '</div>';
-        }
-        html += '</div>';
-        html += '</div>';
-
-        // Attention required
-        var hasAttn = emergencyList.length > 0 || unusualList.length > 0 || militaryList.length > 0;
-        html += '<div class="rf-sum-section">';
-        html += '<div class="rf-sum-title">Attention</div>';
-        if (!hasAttn) {
-            html += '<div class="rf-sum-none">Nothing unusual right now.</div>';
-        } else {
-            // Emergency squawks first
-            emergencyList.forEach(function (q) {
-                var sq = q.squawk;
-                var desc = sq === '7500' ? 'Hijack declared' : sq === '7600' ? 'Radio failure' : 'General emergency';
-                html += '<div class="rf-sum-attn-row rf-sum-attn-emg">' +
-                    '<span class="rf-sum-squawk">SQWK ' + sq + '</span>' +
-                    ' <span class="rf-sum-aname">' + planeName(q) + '</span>' +
-                    (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
-                    ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
-                    ' <span class="rf-sum-altbadge">' + altStr(q) + '</span>' +
-                    ' <span class="rf-sum-attn-desc">' + desc + '</span>' +
+        // ── Altitude distribution ─────────────────────────────────────────────────
+        if (_summarySettings.altitude) {
+            var altLabels  = ['Ground', '< 5,000', '5–10k', '10–20k', '20–30k', '30–40k', '40k+'];
+            var altColors  = ['#6e6e6e', '#7ce8c8', '#7cb9e8', '#7c8fe8', '#a87ce8', '#e87c7c', '#e8a87c'];
+            var altFullLbls= ['Ground', 'Under 5,000 ft', '5,000–10,000 ft', '10,000–20,000 ft', '20,000–30,000 ft', '30,000–40,000 ft', '40,000 ft+'];
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Altitude Distribution <span class="rf-sum-title-sub">click band to filter</span></div>';
+            html += '<div class="rf-sum-altchart">';
+            for (var bi = 0; bi < 7; bi++) {
+                var cnt     = altBands[bi];
+                var barPct  = cnt > 0 ? Math.max(3, Math.round(cnt / altMax * 100)) : 0;
+                var realPct = total > 0 ? Math.round(cnt / total * 100) : 0;
+                var showInside = barPct >= 22 && cnt > 0;
+                // Check if this band is the active _sumFilter (all its ICAOs are selected)
+                var bandIcaos  = altBandIcaos[bi];
+                var bandActive = cnt > 0 && _sumFilter.size > 0 && bandIcaos.length > 0 &&
+                    bandIcaos.every(function(ic){ return _sumFilter.has(ic); });
+                var bandJson   = cnt > 0 ? JSON.stringify(bandIcaos) : '[]';
+                html += '<div class="rf-sum-altrow' + (bandActive ? ' rf-sum-altrow-active' : '') + (cnt > 0 ? ' rf-sum-altrow-clickable' : '') + '" ' +
+                    (cnt > 0 ? 'onclick="window._rfSumFilterSet(' + bandJson + ')" ' : '') +
+                    'title="' + altFullLbls[bi] + ': ' + cnt + ' aircraft (' + realPct + '%)' + (cnt > 0 ? ' — click to filter' : '') + '">' +
+                    '<div class="rf-sum-altrow-lbl" style="color:' + altColors[bi] + '">' + altLabels[bi] + '</div>' +
+                    '<div class="rf-sum-altrow-track">' +
+                        (cnt > 0
+                            ? '<div class="rf-sum-altrow-fill" style="width:' + barPct + '%;background:' + altColors[bi] + '">' +
+                                (showInside ? '<span class="rf-sum-altrow-inner">' + cnt + '</span>' : '') +
+                              '</div>' +
+                              (!showInside ? '<span class="rf-sum-altrow-outer">' + cnt + '</span>' : '')
+                            : '') +
+                    '</div>' +
+                    '<div class="rf-sum-altrow-pct">' + (cnt > 0 ? realPct + '%' : '—') + '</div>' +
                     '</div>';
-            });
-            // Military
-            militaryList.slice(0, 8).forEach(function (q) {
-                html += '<div class="rf-sum-attn-row rf-sum-attn-mil">' +
-                    '<span class="rf-sum-mil-badge">MIL</span>' +
-                    ' <span class="rf-sum-aname">' + planeName(q) + '</span>' +
-                    (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
-                    ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
-                    ' <span class="rf-sum-altbadge">' + altStr(q) + '</span>' +
-                    '</div>';
-            });
-            if (militaryList.length > 8) {
-                html += '<div class="rf-sum-more">and ' + (militaryList.length - 8) + ' more military</div>';
             }
-            // Very low aircraft
-            unusualList.slice(0, 4).forEach(function (item) {
-                var q = item.plane;
-                html += '<div class="rf-sum-attn-row">' +
-                    '<span class="rf-sum-low-badge">LOW</span>' +
-                    ' <span class="rf-sum-aname">' + planeName(q) + '</span>' +
-                    (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
-                    ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
-                    ' <span class="rf-sum-attn-desc">' + esc(item.reason) + '</span>' +
-                    '</div>';
-            });
+            html += '</div>';
+            html += '</div>';
         }
-        html += '</div>';
 
-        // Closest aircraft (only if we have receiver position)
-        if (closestPlanes.length > 0) {
+        // ── Attention required ────────────────────────────────────────────────────
+        if (_summarySettings.attention) {
+            var hasAttn = emergencyList.length > 0 || unusualList.length > 0 || militaryList.length > 0;
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Attention</div>';
+            if (!hasAttn) {
+                html += '<div class="rf-sum-none">Nothing unusual right now.</div>';
+            } else {
+                // Emergency squawks — clickable header filters all emergency planes
+                if (emergencyList.length > 0) {
+                    var emgIcaos = JSON.stringify(emergencyList.map(function(q){ return q.icao; }));
+                    html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterSet(' + emgIcaos + ')" title="Click to filter all emergency aircraft">' +
+                        '<span class="rf-sum-squawk-hdr">&#9888; Emergency (' + emergencyList.length + ')</span>' +
+                        '</div>';
+                    emergencyList.forEach(function (q) {
+                        var sq   = q.squawk;
+                        var desc = sq === '7500' ? 'Hijack' : sq === '7600' ? 'Radio fail' : 'Emergency';
+                        html += planeRow(q, '<span class="rf-sum-squawk">SQWK\u00a0' + sq + ' ' + desc + '</span>');
+                    });
+                }
+                // Military — clickable header filters all military planes
+                if (militaryList.length > 0) {
+                    var milIcaos = JSON.stringify(militaryList.map(function(q){ return q.icao; }));
+                    html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterSet(' + milIcaos + ')" title="Click to filter all military aircraft">' +
+                        '<span class="rf-sum-mil-badge">MIL (' + militaryList.length + ')</span>' +
+                        '</div>';
+                    militaryList.slice(0, 8).forEach(function (q) {
+                        html += planeRow(q, '<span class="rf-sum-mil-badge">MIL</span>');
+                    });
+                    if (militaryList.length > 8) {
+                        html += '<div class="rf-sum-more">and ' + (militaryList.length - 8) + ' more \u2014 <span class="rf-sum-link" onclick="window._rfSumFilterSet(' + milIcaos + ')">filter all</span></div>';
+                    }
+                }
+                // Very low aircraft
+                if (unusualList.length > 0) {
+                    var lowIcaos = JSON.stringify(unusualList.map(function(i){ return i.plane.icao; }));
+                    html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterSet(' + lowIcaos + ')" title="Click to filter all low-altitude aircraft">' +
+                        '<span class="rf-sum-low-badge">LOW (' + unusualList.length + ')</span>' +
+                        '</div>';
+                    unusualList.slice(0, 4).forEach(function (item) {
+                        html += planeRow(item.plane, '<span class="rf-sum-low-badge">LOW</span> <span class="rf-sum-attn-desc">' + esc(item.reason) + '</span>');
+                    });
+                }
+            }
+            html += '</div>';
+        }
+
+        // ── Closest aircraft ──────────────────────────────────────────────────────
+        if (_summarySettings.closest && closestPlanes.length > 0) {
             html += '<div class="rf-sum-section">';
             html += '<div class="rf-sum-title">Closest Aircraft</div>';
             closestPlanes.forEach(function (item) {
                 var q = item.plane;
-                html += '<div class="rf-sum-close-row">' +
-                    '<span class="rf-sum-dist">' + item.dist.toFixed(0) + '\u2009nm</span>' +
-                    ' <span class="rf-sum-aname">' + planeName(q) + '</span>' +
-                    (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
-                    ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
-                    ' <span class="rf-sum-altbadge">' + altStr(q) + '</span>' +
-                    (typeof q.gs === 'number' ? ' <span class="rf-sum-speed">' + Math.round(q.gs) + '\u2009kt</span>' : '') +
+                html += planeRow(q, '<span class="rf-sum-dist">' + item.dist.toFixed(0) + '\u2009nm</span>');
+            });
+            html += '</div>';
+        }
+
+        // ── Speed leaders ─────────────────────────────────────────────────────────
+        if (_summarySettings.speed && speedList.length > 0) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Speed Leaders</div>';
+            var spdMax = speedList[0].gs || 1;
+            speedList.forEach(function (q, idx) {
+                var spdPct = Math.round(q.gs / spdMax * 100);
+                var ic = (q.icao || '').toUpperCase();
+                var sel = _sumFilter.size > 0 && _sumFilter.has(ic);
+                html += '<div class="rf-sum-leader-row' + (sel ? ' rf-sum-plane-sel' : '') + '" onclick="window._rfSumFilterIcao(\'' + ic + '\')" title="Click to filter to this aircraft">' +
+                    '<div class="rf-sum-leader-rank">' + (idx + 1) + '</div>' +
+                    '<div class="rf-sum-leader-info">' +
+                        '<div class="rf-sum-leader-name">' + planeName(q) +
+                            (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
+                            ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
+                        '</div>' +
+                        '<div class="rf-sum-leader-bar-wrap"><div class="rf-sum-leader-bar rf-sum-leader-bar-spd" style="width:' + spdPct + '%"></div></div>' +
+                    '</div>' +
+                    '<div class="rf-sum-leader-val">' + Math.round(q.gs) + '\u2009kt</div>' +
                     '</div>';
             });
             html += '</div>';
         }
 
-        // Busiest operators
-        if (topOps.length > 0) {
+        // ── Slowest aircraft ──────────────────────────────────────────────────────
+        if (_summarySettings.slowest && slowestList.length > 0) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Slowest Airborne</div>';
+            var slowMax = slowestList[slowestList.length - 1].gs || 1;
+            slowestList.forEach(function (q, idx) {
+                var spdPct = Math.max(4, Math.round(q.gs / slowMax * 100));
+                var ic = (q.icao || '').toUpperCase();
+                var sel = _sumFilter.size > 0 && _sumFilter.has(ic);
+                html += '<div class="rf-sum-leader-row' + (sel ? ' rf-sum-plane-sel' : '') + '" onclick="window._rfSumFilterIcao(\'' + ic + '\')" title="Click to filter to this aircraft">' +
+                    '<div class="rf-sum-leader-rank">' + (idx + 1) + '</div>' +
+                    '<div class="rf-sum-leader-info">' +
+                        '<div class="rf-sum-leader-name">' + planeName(q) +
+                            (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
+                            ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
+                        '</div>' +
+                        '<div class="rf-sum-leader-bar-wrap"><div class="rf-sum-leader-bar rf-sum-leader-bar-slow" style="width:' + spdPct + '%"></div></div>' +
+                    '</div>' +
+                    '<div class="rf-sum-leader-val">' + Math.round(q.gs) + '\u2009kt</div>' +
+                    '</div>';
+            });
+            html += '</div>';
+        }
+
+        // ── High flyers ───────────────────────────────────────────────────────────
+        if (_summarySettings.highflyers && highList.length > 0) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">High Flyers</div>';
+            var hiMax = altNum2(highList[0]) || 1;
+            highList.forEach(function (q, idx) {
+                var hiAlt = altNum2(q);
+                var hiPct = Math.round(hiAlt / hiMax * 100);
+                var ic = (q.icao || '').toUpperCase();
+                var sel = _sumFilter.size > 0 && _sumFilter.has(ic);
+                html += '<div class="rf-sum-leader-row' + (sel ? ' rf-sum-plane-sel' : '') + '" onclick="window._rfSumFilterIcao(\'' + ic + '\')" title="Click to filter to this aircraft">' +
+                    '<div class="rf-sum-leader-rank">' + (idx + 1) + '</div>' +
+                    '<div class="rf-sum-leader-info">' +
+                        '<div class="rf-sum-leader-name">' + planeName(q) +
+                            (planeReg(q) ? ' <span class="rf-sum-reg">' + planeReg(q) + '</span>' : '') +
+                            ' <span class="rf-sum-type">' + planeType(q) + '</span>' +
+                        '</div>' +
+                        '<div class="rf-sum-leader-bar-wrap"><div class="rf-sum-leader-bar rf-sum-leader-bar-alt" style="width:' + hiPct + '%"></div></div>' +
+                    '</div>' +
+                    '<div class="rf-sum-leader-val">' + hiAlt.toLocaleString() + '\u2009ft</div>' +
+                    '</div>';
+            });
+            html += '</div>';
+        }
+
+        // ── Aircraft types ────────────────────────────────────────────────────────
+        if (_summarySettings.types && topTypes.length > 0) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Aircraft Types</div>';
+            html += '<div class="rf-sum-types-grid">';
+            topTypes.forEach(function (t) {
+                html += '<div class="rf-sum-type-pill">' +
+                    '<span class="rf-sum-type-code">' + esc(t[0]) + '</span>' +
+                    '<span class="rf-sum-type-cnt">' + t[1] + '</span>' +
+                    '</div>';
+            });
+            html += '</div>';
+            html += '</div>';
+        }
+
+        // ── Busiest operators ─────────────────────────────────────────────────────
+        if (_summarySettings.operators && topOps.length > 0) {
             html += '<div class="rf-sum-section">';
             html += '<div class="rf-sum-title">Busiest Operators</div>';
             html += '<div class="rf-sum-bar-list">';
@@ -1448,16 +1869,22 @@
             html += '</div>';
         }
 
-        // Busiest routes
-        if (topRoutes.length > 0) {
+        // ── Busiest routes ────────────────────────────────────────────────────────
+        if (_summarySettings.routes && topRoutes.length > 0) {
             html += '<div class="rf-sum-section">';
             html += '<div class="rf-sum-title">Busiest Routes</div>';
             html += '<div class="rf-sum-bar-list">';
             var rtMax = topRoutes[0][1] || 1;
             topRoutes.forEach(function (rt) {
-                var w = Math.round(rt[1] / rtMax * 100);
+                var w    = Math.round(rt[1] / rtMax * 100);
+                // rt[0] = "EGLL – LFPG" — add flag to each airport code
+                var parts = rt[0].split(' \u2013 ');
+                var rtLabel = parts.map(function(ap) {
+                    var f = airportFlag(ap.trim());
+                    return (f ? f + '\u2009' : '') + esc(ap.trim());
+                }).join(' <span style="color:#555">\u2013</span> ');
                 html += '<div class="rf-sum-bar-row">' +
-                    '<div class="rf-sum-bar-label">' + esc(rt[0]) + '</div>' +
+                    '<div class="rf-sum-bar-label">' + rtLabel + '</div>' +
                     '<div class="rf-sum-bar-track"><div class="rf-sum-bar-fill rf-sum-bar-fill-route" style="width:' + w + '%"></div></div>' +
                     '<div class="rf-sum-bar-cnt">' + rt[1] + '</div>' +
                     '</div>';
@@ -1466,13 +1893,101 @@
             html += '</div>';
         }
 
-        html += '<div class="rf-sum-footer">Refreshes every 3s. Filters active on other tabs do not affect this view.</div>';
+        // ── Tracking methods ──────────────────────────────────────────────────────
+        if (_summarySettings.methods) {
+            var hasMethods = methodCounts.adsb + methodCounts.mlat + methodCounts.tisb +
+                             methodCounts.modes + methodCounts.other > 0;
+            if (hasMethods) {
+                var methodDefs = [
+                    { key: 'adsb',  label: 'ADS-B',   cls: 'rf-sum-meth-adsb'  },
+                    { key: 'mlat',  label: 'MLAT',    cls: 'rf-sum-meth-mlat'  },
+                    { key: 'tisb',  label: 'TIS-B',   cls: 'rf-sum-meth-tisb'  },
+                    { key: 'modes', label: 'Mode S',  cls: 'rf-sum-meth-modes' },
+                    { key: 'other', label: 'Other',   cls: 'rf-sum-meth-other' },
+                ];
+                html += '<div class="rf-sum-section">';
+                html += '<div class="rf-sum-title">Tracking Methods</div>';
+                html += '<div class="rf-sum-methods">';
+                methodDefs.forEach(function (m) {
+                    var cnt = methodCounts[m.key];
+                    if (cnt === 0) return;
+                    var pct = Math.round(cnt / total * 100);
+                    html += '<div class="rf-sum-meth-item ' + m.cls + '">' +
+                        '<div class="rf-sum-meth-cnt">' + cnt + '</div>' +
+                        '<div class="rf-sum-meth-label">' + m.label + '</div>' +
+                        '<div class="rf-sum-meth-pct">' + pct + '%</div>' +
+                        '</div>';
+                });
+                html += '</div>';
+                html += '</div>';
+            }
+        }
+
+        // ── Range & coverage ──────────────────────────────────────────────────────
+        if (_summarySettings.range && furthestItem && rxLat !== null) {
+            var fq     = furthestItem.plane;
+            var fBear  = _rfBearing(rxLat, rxLon, furthestItem.lat, furthestItem.lon);
+            var fCard  = _rfCardinal(fBear);
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Range &amp; Coverage</div>';
+            html += '<div class="rf-sum-range-row">' +
+                '<div class="rf-sum-range-compass"><div class="rf-sum-range-arrow" style="transform:rotate(' + Math.round(fBear) + 'deg)">&#9650;</div></div>' +
+                '<div class="rf-sum-range-info">' +
+                    '<div class="rf-sum-range-dist">' + furthestItem.dist.toFixed(0) + '<span class="rf-sum-range-unit">\u2009nm</span></div>' +
+                    '<div class="rf-sum-range-detail">' +
+                        fCard + ' \u2022 ' +
+                        '<span class="rf-sum-aname">' + planeName(fq) + '</span>' +
+                        (planeReg(fq) ? ' <span class="rf-sum-reg">' + planeReg(fq) + '</span>' : '') +
+                        ' <span class="rf-sum-type">' + planeType(fq) + '</span>' +
+                    '</div>' +
+                '</div>' +
+                '</div>';
+            html += '</div>';
+        }
+
+        // ── Countries ─────────────────────────────────────────────────────────────
+        if (_summarySettings.countries && topCountries.length > 0) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Countries</div>';
+            html += '<div class="rf-sum-bar-list">';
+            var ctMax = topCountries[0][1] || 1;
+            topCountries.forEach(function (c) {
+                var w    = Math.round(c[1] / ctMax * 100);
+                var iso2 = _toIso2(c[0]);
+                var flag = iso2 ? flagFromIso(iso2) + '\u2009' : '';
+                html += '<div class="rf-sum-bar-row">' +
+                    '<div class="rf-sum-bar-label">' + flag + esc(c[0]) + '</div>' +
+                    '<div class="rf-sum-bar-track"><div class="rf-sum-bar-fill rf-sum-bar-fill-country" style="width:' + w + '%"></div></div>' +
+                    '<div class="rf-sum-bar-cnt">' + c[1] + '</div>' +
+                    '</div>';
+            });
+            html += '</div>';
+            html += '</div>';
+        }
+
+        // ── Recent arrivals ───────────────────────────────────────────────────────
+        if (_summarySettings.arrivals) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Recent Arrivals <span class="rf-sum-title-sub">(last 5 min)</span></div>';
+            if (recentArrivals.length === 0) {
+                html += '<div class="rf-sum-none">No new contacts in the last 5 minutes.</div>';
+            } else {
+                recentArrivals.forEach(function (q) {
+                    var secsAgo = Math.round((nowMs - _sumArrivals[q.icao]) / 1000);
+                    var timeAgo = secsAgo < 60 ? secsAgo + 's ago' : Math.floor(secsAgo / 60) + 'm\u2009ago';
+                    html += planeRow(q, '<span class="rf-sum-arrival-age">' + timeAgo + '</span>');
+                });
+            }
+            html += '</div>';
+        }
+
+        html += '<div class="rf-sum-footer">Refreshes every 3s &bull; Manage sections in <span class="rf-sum-footer-link" onclick="window._rfSwitchTab(\'settings\')">Settings &#9881;</span></div>';
         html += '</div>';
 
         listEl.innerHTML = html;
 
         var statusEl = document.getElementById('rf-status');
-        if (statusEl) statusEl.textContent = total + ' aircraft';
+        if (statusEl) statusEl.textContent = total + ' aircraft' + (_summaryInView ? ' in view' : '');
         var btn = document.getElementById('rf-btn');
         if (btn) btn.className = 'button ' + (isFilterActive() ? 'activeButton' : 'inActiveButton');
     }
@@ -1512,6 +2027,13 @@
                 '<div class="rf-set-toggle-desc">When on, filter lists and the map filter only consider aircraft currently visible in the viewport.</div>' +
                 '</div>' +
                 '</label>' +
+                '<label class="rf-set-toggle" style="margin-top:6px">' +
+                '<input type="checkbox"' + (_summarySettings.defaultInView ? ' checked' : '') + ' onchange="window._rfSetSumDefaultInView(this.checked)">' +
+                '<div class="rf-set-toggle-body">' +
+                '<div class="rf-set-toggle-label">Summary tab: default to in map view</div>' +
+                '<div class="rf-set-toggle-desc">When on, the Summary tab opens showing only aircraft in the current map viewport. You can always switch on the fly using the toggle at the top of the Summary tab.</div>' +
+                '</div>' +
+                '</label>' +
                 '</div>' +
 
                 '<div class="rf-set-divider"></div>' +
@@ -1539,6 +2061,37 @@
                 '</div>' +
                 '</label>' +
                 dbStatusHtml() +
+                '</div>' +
+
+                '<div class="rf-set-divider"></div>' +
+
+                // ── Summary display ───────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Summary Tab Sections</div>' +
+                '<div class="rf-set-group-desc">Choose which sections are shown on the Summary tab.</div>' +
+                [
+                    ['altitude',   'Altitude Distribution', 'Bar chart showing how many aircraft are in each altitude band'],
+                    ['attention',  'Attention Alerts',      'Emergency squawks, military contacts, and very-low aircraft'],
+                    ['closest',    'Closest Aircraft',      'The 5 aircraft nearest to your receiver'],
+                    ['speed',      'Speed Leaders',         'The 5 fastest airborne aircraft by ground speed'],
+                    ['highflyers', 'High Flyers',           'The 5 highest-altitude aircraft currently visible'],
+                    ['types',      'Aircraft Types',        'Most common ICAO type codes seen right now'],
+                    ['operators',  'Busiest Operators',     'Airlines or operators with the most aircraft visible'],
+                    ['routes',     'Busiest Routes',        'Airport-pair routes with the most flights right now'],
+                    ['methods',    'Tracking Methods',      'Breakdown of ADS-B, MLAT, TIS-B and Mode S contacts'],
+                    ['range',      'Range & Coverage',      'Furthest aircraft detected and its bearing from your receiver'],
+                    ['countries',  'Countries',             'Top countries visible, identified from aircraft registrations'],
+                    ['arrivals',   'Recent Arrivals',       'Aircraft that first appeared in the last 5 minutes'],
+                    ['slowest',    'Slowest Airborne',      'The 5 slowest airborne aircraft currently flying (> 30 kt ground speed)'],
+                ].map(function (s) {
+                    return '<label class="rf-set-toggle">' +
+                        '<input type="checkbox"' + (_summarySettings[s[0]] ? ' checked' : '') + ' onchange="window._rfSetSummarySection(\'' + s[0] + '\',this.checked)">' +
+                        '<div class="rf-set-toggle-body">' +
+                        '<div class="rf-set-toggle-label">' + s[1] + '</div>' +
+                        '<div class="rf-set-toggle-desc">' + s[2] + '</div>' +
+                        '</div>' +
+                        '</label>';
+                }).join('') +
                 '</div>' +
 
                 '<div class="rf-set-divider"></div>' +
@@ -1612,35 +2165,82 @@
         var hdrEl = document.getElementById('rf-colheader');
         if (hdrEl) hdrEl.innerHTML = '';
 
-        // Saved locations dropdown - uses _distanceForm for selected index
-        var locOpts = '<option value="">-- Select saved location --</option>';
-        _distanceLocations.forEach(function (loc, idx) {
-            var sel = (_distanceForm.locationIdx === idx) ? ' selected' : '';
-            locOpts += '<option value="' + idx + '"' + sel + '>' +
-                loc.name.replace(/</g, '&lt;').replace(/>/g, '&gt;') +
-                ' (' + loc.lat.toFixed(4) + ', ' + loc.lon.toFixed(4) + ')' +
-                '</option>';
-        });
-
         // Use _distanceForm for all input values so auto-refresh doesn't wipe edits
         var altAll = _distanceForm.altMode !== 'between';
         var altRng = altAll ? 'display:none' : '';
 
-        var statusText = '';
-        if (_distanceFilter.active) {
-            var sp = [(_distanceFilter.locationName || 'Custom') + ' \u2014 ' + _distanceFilter.radiusNm + ' NM'];
-            if (_distanceFilter.altMode === 'between') {
-                sp.push(_distanceFilter.altMin.toLocaleString() + ' \u2013 ' + _distanceFilter.altMax.toLocaleString() + ' ft');
-            }
-            statusText = sp.join(' | ');
-        }
-
         var listEl = document.getElementById('rf-list');
         if (listEl) {
+            // Auto-populate centre from receiver position BEFORE building HTML
+            if (!_distanceForm.lat || !_distanceForm.lon) {
+                var rp0 = _rfGetReceiverPos();
+                _distanceForm.lat = rp0.lat.toFixed(5);
+                _distanceForm.lon = rp0.lon.toFixed(5);
+            }
+
+            // ── Active zones section ──────────────────────────────────────────
+            var zonesHtml = '';
+            if (_distanceZones.length > 0) {
+                var ZONE_COLORS_UI = ['#00c8e6','#f0e040','#e040fb','#69f080','#ff9800','#ff4444'];
+                zonesHtml += '<div class="rf-setting-section-title" style="margin:4px 0">Active Zones (' + _distanceZones.length + ')</div>';
+                zonesHtml += '<div class="rf-dist-active-zone-list">';
+                _distanceZones.forEach(function(z, i) {
+                    var c = ZONE_COLORS_UI[i % ZONE_COLORS_UI.length];
+                    var altInfo = z.altMode === 'between'
+                        ? ' \u2014 ' + z.altMin.toLocaleString() + '\u2013' + z.altMax.toLocaleString() + 'ft'
+                        : '';
+                    zonesHtml +=
+                        '<div class="rf-dist-zone-pill">' +
+                        '<span class="rf-dist-zone-dot" style="background:' + c + '"></span>' +
+                        '<span class="rf-dist-zone-pill-text">' +
+                        z.name.replace(/&/g,'&amp;').replace(/</g,'&lt;') +
+                        ' \u2014 ' + z.radiusNm + '\u00a0NM' + altInfo +
+                        '</span>' +
+                        '<button class="rf-dist-pill-x" onclick="window._rfDistRemoveZone(' + i + ')" title="Remove this zone">\u2715</button>' +
+                        '</div>';
+                });
+                zonesHtml += '</div>';
+                zonesHtml +=
+                    '<div style="display:flex;gap:6px;margin:4px 0 6px">' +
+                    '<button class="rf-cat-btn rf-dist-clearbtn" onclick="window._rfDistClear()">Clear All</button>' +
+                    '<button class="rf-cat-btn" onclick="window._rfPanToDistZone()" title="Pan the main map to fit all filter zones">&#x1F50D; Pan to zones</button>' +
+                    '</div>' +
+                    '<div class="rf-setting-divider"></div>';
+            }
+
+            // ── Saved locations section ───────────────────────────────────────
+            var savedLocsHtml = '';
+            if (_distanceLocations.length > 0) {
+                savedLocsHtml += '<div class="rf-setting-section-title" style="margin:4px 0">Saved Locations</div>';
+                savedLocsHtml += '<div class="rf-dist-saved-list">';
+                _distanceLocations.forEach(function(loc, idx) {
+                    var isActive = _distanceZones.some(function(z) { return z.name === loc.name; });
+                    savedLocsHtml +=
+                        '<div class="rf-dist-saved-row' + (isActive ? ' rf-dist-saved-active' : '') + '">' +
+                        '<div class="rf-dist-saved-info">' +
+                        '<span class="rf-dist-saved-name">' + loc.name.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>' +
+                        '<span class="rf-dist-saved-detail">' + loc.lat.toFixed(4) + ', ' + loc.lon.toFixed(4) + ' \u2014 ' + loc.radiusNm + '\u00a0NM</span>' +
+                        '</div>' +
+                        '<div style="display:flex;gap:3px;flex-shrink:0">' +
+                        '<button class="rf-cat-btn' + (isActive ? ' rf-cat-active' : '') + '" style="min-width:74px" onclick="window._rfDistToggleLoc(' + idx + ')" title="' + (isActive ? 'Remove from active zones' : 'Add to active zones') + '">' +
+                        (isActive ? '&#x2713;\u00a0Active' : '+\u00a0Activate') +
+                        '</button>' +
+                        '<button class="rf-cat-btn" onclick="window._rfDistLoadLoc(' + idx + ')" title="Load into form to edit">Edit</button>' +
+                        '<button class="rf-cat-btn rf-dist-delbtn" onclick="window._rfDistDeleteLoc(' + idx + ')" title="Delete saved location">&#x1F5D1;</button>' +
+                        '</div>' +
+                        '</div>';
+                });
+                savedLocsHtml += '</div><div class="rf-setting-divider"></div>';
+            }
+
             listEl.innerHTML =
                 '<div class="rf-dist-content">' +
 
                 '<div id="rf-dist-map" class="rf-dist-map"></div>' +
+
+                zonesHtml +
+
+                '<div class="rf-setting-section-title" style="margin:4px 0">Add Zone</div>' +
 
                 '<div class="rf-dist-row">' +
                 '<span id="rf-dist-coords" class="rf-dist-coords">' +
@@ -1664,23 +2264,20 @@
                 ' value="' + _distanceForm.radiusNm + '"' +
                 ' oninput="window._rfDistRadiusChanged(this.value)">' +
                 '<span class="rf-dist-unit">NM</span>' +
-                (_distanceLocations.length > 0 || (_distanceForm.lat && _distanceForm.lon)
-                    ? '<button class="rf-cat-btn rf-dist-savebtn" onclick="window._rfDistSaveLoc()">Save</button>'
-                    : '') +
                 '</div>' +
 
-                '<div class="rf-setting-section-title" style="margin-top:6px">Saved Locations</div>' +
-                '<div class="rf-dist-row">' +
-                '<select id="rf-dist-locsel" class="rf-dist-select" onchange="window._rfDistSelectLoc(this.value)">' +
-                locOpts +
-                '</select>' +
-                (_distanceLocations.length > 0
-                    ? '<button class="rf-cat-btn rf-dist-delbtn" onclick="window._rfDistDeleteLoc()">Delete</button>'
+                '<div class="rf-dist-row" style="margin-top:4px;gap:6px">' +
+                '<button class="rf-cat-btn rf-cat-active" onclick="window._rfDistApply()" title="Add this zone to the active filter">+ Add Zone</button>' +
+                ((_distanceForm.lat && _distanceForm.lon)
+                    ? '<button class="rf-cat-btn rf-dist-savebtn" onclick="window._rfDistSaveLoc()" title="Save this location and add as an active zone">&#128190; Save &amp; Add</button>'
                     : '') +
                 '</div>' +
 
                 '<div class="rf-setting-divider"></div>' +
-                '<div class="rf-setting-section-title">Altitude</div>' +
+
+                savedLocsHtml +
+
+                '<div class="rf-setting-section-title" style="margin:4px 0">Altitude</div>' +
 
                 '<div class="rf-dist-row rf-dist-alt-row">' +
                 '<label class="rf-dist-radio-label">' +
@@ -1707,21 +2304,6 @@
                 '</div>' +
                 '</div>' +
 
-                '<div class="rf-setting-divider"></div>' +
-
-                '<div class="rf-dist-row">' +
-                '<button class="rf-cat-btn' + (_distanceFilter.active ? ' rf-cat-active' : '') + '" onclick="window._rfDistApply()">' +
-                (_distanceFilter.active ? 'Update Filter' : 'Apply Filter') +
-                '</button>' +
-                (_distanceFilter.active
-                    ? '<button class="rf-cat-btn rf-dist-clearbtn" onclick="window._rfDistClear()">Clear</button>'
-                    : '') +
-                '</div>' +
-
-                (statusText
-                    ? '<div class="rf-dist-status">' + statusText.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>'
-                    : '') +
-
                 '</div>';
 
             // Initialise Leaflet map after DOM update
@@ -1730,12 +2312,12 @@
 
         var statusEl = document.getElementById('rf-status');
         if (statusEl) {
-            if (_distanceFilter.active && gReady()) {
+            if (_distanceZones.length > 0 && gReady()) {
                 var cnt = 0;
                 for (var di = 0; di < g.planesOrdered.length; di++) {
                     if (planePassesDistanceFilter(g.planesOrdered[di])) cnt++;
                 }
-                statusEl.textContent = cnt + ' aircraft in zone';
+                statusEl.textContent = cnt + ' aircraft in zone' + (_distanceZones.length > 1 ? 's' : '');
             } else {
                 statusEl.textContent = '';
             }
@@ -2500,8 +3082,8 @@
         if (el) el.style.display = on ? '' : 'none';
         // Side effects
         if (tab === 'alerts' && on && !_alertsDb && !_alertsFetching) loadAlerts(false);
-        if (tab === 'distance' && !on && _distanceFilter.active) {
-            _distanceFilter.active = false;
+        if (tab === 'distance' && !on && _distanceZones.length > 0) {
+            _distanceZones = [];
             applyFilter();
         }
         try { localStorage.setItem(TAB_VIS_KEY, JSON.stringify(_tabVisibility)); } catch (e) {}
@@ -2512,18 +3094,86 @@
     window._rfSetAlertsEnabled   = function (on) { window._rfSetTabVisible('alerts',   on); };
     window._rfSetDistanceEnabled = function (on) { window._rfSetTabVisible('distance', on); };
 
+    // Summary section visibility toggle
+    window._rfSetSummarySection = function (section, on) {
+        _summarySettings[section] = !!on;
+        try { localStorage.setItem(SUMMARY_SETTINGS_KEY, JSON.stringify(_summarySettings)); } catch (e) {}
+        if (state.activeTab === 'summary') buildPanel();
+    };
+
+    // Summary quick-filter handlers
+    window._rfSumFilterIcao = function (icao) {
+        icao = (icao || '').toUpperCase();
+        if (_sumFilter.has(icao)) { _sumFilter.delete(icao); } else { _sumFilter.add(icao); }
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfSumFilterSet = function (icaos) {
+        _sumFilter.clear();
+        (icaos || []).forEach(function(ic) { _sumFilter.add((ic || '').toUpperCase()); });
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfClearSumFilter = function () {
+        _sumFilter.clear();
+        applyFilter();
+        buildPanel();
+    };
+
+    // Summary scope toggle — session-level, does NOT persist
+    window._rfSumToggleScope = function (inView) {
+        _summaryInView = !!inView;
+        if (state.activeTab === 'summary') buildPanel();
+    };
+
+    // Summary default scope — persisted so it survives page reload
+    window._rfSetSumDefaultInView = function (on) {
+        _summarySettings.defaultInView = !!on;
+        _summaryInView = !!on;
+        try { localStorage.setItem(SUMMARY_SETTINGS_KEY, JSON.stringify(_summarySettings)); } catch (e) {}
+        if (state.activeTab === 'summary') buildPanel();
+    };
+
     // ── Distance tab handlers ─────────────────────────────────────────────────
+
+    // Safely get tar1090's OL map instance.
+    // tar1090 stores it as `OLMap` (let-declared in script.js, shared global scope).
+    // `g.map` does NOT exist — never use it.
+    function _rfOLMap() {
+        // Primary: OLMap is a let-global in script.js; all non-module scripts
+        // share the same global lexical environment in browsers.
+        try { if (typeof OLMap !== 'undefined' && OLMap && OLMap.getView) return OLMap; } catch(e) {}
+        // Fallback: scan window for any ol.Map instance (catches var-declared maps)
+        try {
+            var keys = Object.keys(window);
+            for (var ki = 0; ki < keys.length; ki++) {
+                var kv = window[keys[ki]];
+                if (kv && typeof kv.getView === 'function' &&
+                    typeof kv.getLayers === 'function' && typeof kv.addLayer === 'function') return kv;
+            }
+        } catch(e) {}
+        return null;
+    }
 
     function _rfGetReceiverPos() {
         try {
-            var c = g.map.getView().getCenter();
+            var m = _rfOLMap();
+            if (!m) throw new Error('no map');
+            var c = m.getView().getCenter();
             if (window.ol && ol.proj && ol.proj.toLonLat) {
                 var ll = ol.proj.toLonLat(c);
-                return { lat: ll[1], lon: ll[0] };
+                // Sanity-check: valid lat/lon (not projected meter values)
+                if (!isNaN(ll[1]) && Math.abs(ll[1]) <= 90 && Math.abs(ll[0]) <= 180) {
+                    return { lat: ll[1], lon: ll[0] };
+                }
             }
-            if (c && c.length >= 2) return { lat: c[1], lon: c[0] };
+            // Do NOT fall through with raw projected coords — they would be
+            // in metres (EPSG:3857) and useless as lat/lon degrees.
         } catch(e) {}
-        try { if (typeof SiteLat !== 'undefined') return { lat: SiteLat, lon: SiteLon }; } catch(e) {}
+        try { if (typeof SiteLat !== 'undefined' && SiteLat) return { lat: +SiteLat, lon: +SiteLon }; } catch(e) {}
+        try { if (typeof g !== 'undefined' && g.SitePosition && g.SitePosition.lat) return { lat: g.SitePosition.lat, lon: g.SitePosition.lng }; } catch(e) {}
         return { lat: 53.07, lon: -0.77 };
     }
 
@@ -2559,8 +3209,13 @@
         var container = document.getElementById('rf-dist-map');
         if (!container) return;
 
+        // Preserve zoom level across panel auto-refreshes
+        var savedZoom = _distanceForm.mapZoom || 8;
+
         // Destroy stale map if container was recreated
         if (_distMap) {
+            savedZoom = _distMap.getZoom();
+            _distanceForm.mapZoom = savedZoom;
             try { _distMap.remove(); } catch(e) {}
             _distMap = null; _distMapMarker = null; _distMapCircle = null;
         }
@@ -2577,7 +3232,7 @@
             zoomControl:       true,
             attributionControl: false,
             scrollWheelZoom:   true,
-        }).setView([lat, lon], 8);
+        }).setView([lat, lon], savedZoom);
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
@@ -2633,6 +3288,198 @@
         }
     }
 
+    function _rfPersistDistFilter() {
+        try {
+            if (_distanceZones.length > 0) {
+                localStorage.setItem(DIST_ZONES_KEY, JSON.stringify(_distanceZones));
+            } else {
+                localStorage.removeItem(DIST_ZONES_KEY);
+            }
+        } catch(e) {}
+    }
+
+    // ── Main-map OL overlay (distance rings) ─────────────────────────────────
+    // Build a geodesic ring geometry in EPSG:3857 (same technique as tar1090 range rings)
+    function _rfGeodesicPoly(lat, lon, radiusM, npts) {
+        // TAR is a let-global in script.js — use typeof, NOT window.TAR
+        try {
+            if (typeof TAR !== 'undefined' && TAR.utils &&
+                typeof TAR.utils.make_geodesic_circle === 'function') {
+                var g2 = TAR.utils.make_geodesic_circle([lon, lat], radiusM, npts);
+                g2.transform('EPSG:4326', 'EPSG:3857');
+                return g2;
+            }
+        } catch (e) {}
+        // Fallback: sample the circle in WGS84, project each point to EPSG:3857.
+        // Use LineString (ol.geom.Polygon may not exist in this OL build).
+        var R  = 6371008.8;
+        var d  = radiusM / R;
+        var la = lat * Math.PI / 180;
+        var lo = lon * Math.PI / 180;
+        var pts = [];
+        for (var i = 0; i <= npts; i++) {
+            var b   = (i * 2 * Math.PI) / npts;
+            var la2 = Math.asin(Math.sin(la) * Math.cos(d) + Math.cos(la) * Math.sin(d) * Math.cos(b));
+            var lo2 = lo + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(la),
+                                      Math.cos(d) - Math.sin(la) * Math.sin(la2));
+            pts.push(ol.proj.fromLonLat([lo2 * 180 / Math.PI, la2 * 180 / Math.PI]));
+        }
+        // ol.geom.LineString is confirmed present in this OL build
+        return new ol.geom.LineString(pts);
+    }
+
+    var ZONE_COLORS_OL   = ['#00c8e6','#f0e040','#e040fb','#69f080','#ff9800','#ff4444'];
+    var ZONE_FILLS_OL    = [
+        'rgba(0,200,230,0.05)','rgba(240,224,64,0.05)','rgba(224,64,251,0.05)',
+        'rgba(105,240,128,0.05)','rgba(255,152,0,0.05)','rgba(255,68,68,0.05)',
+    ];
+
+    // Build zone features and add them to `src`, tagging each with _rfDist=true
+    function _rfBuildZoneFeatures(src) {
+        _distanceZones.forEach(function(zone, i) {
+            var color   = ZONE_COLORS_OL[i % ZONE_COLORS_OL.length];
+            var fill    = ZONE_FILLS_OL [i % ZONE_FILLS_OL.length];
+            var radiusM = zone.radiusNm * 1852;
+            var center  = ol.proj.fromLonLat([zone.lon, zone.lat]);
+
+            var ringGeom = _rfGeodesicPoly(zone.lat, zone.lon, radiusM, 90);
+            var ringFeat = new ol.Feature({ geometry: ringGeom });
+            ringFeat.set('_rfDist', true);
+            ringFeat.setStyle(new ol.style.Style({
+                stroke: new ol.style.Stroke({ color: color, width: 2, lineDash: [10, 5] }),
+                fill:   new ol.style.Fill  ({ color: fill }),
+            }));
+
+            var dotFeat = new ol.Feature({ geometry: new ol.geom.Point(center) });
+            dotFeat.set('_rfDist', true);
+            dotFeat.setStyle(new ol.style.Style({
+                image: new ol.style.Circle({
+                    radius: 5,
+                    fill:   new ol.style.Fill  ({ color: color }),
+                    stroke: new ol.style.Stroke({ color: '#fff', width: 1.5 }),
+                }),
+            }));
+
+            var lbl = zone.name.replace(/&amp;/g, '&') + '\n' + zone.radiusNm + ' NM';
+            var lblFeat = new ol.Feature({ geometry: new ol.geom.Point(center) });
+            lblFeat.set('_rfDist', true);
+            lblFeat.setStyle(new ol.style.Style({
+                text: new ol.style.Text({
+                    text:      lbl,
+                    font:      'bold 12px sans-serif',
+                    fill:      new ol.style.Fill  ({ color: '#fff' }),
+                    stroke:    new ol.style.Stroke({ color: 'rgba(0,0,0,0.75)', width: 3 }),
+                    offsetY:   20,
+                    textAlign: 'center',
+                }),
+            }));
+
+            src.addFeatures([ringFeat, dotFeat, lblFeat]);
+        });
+    }
+
+    // Remove all _rfDist-tagged features from a source
+    function _rfRemoveDistFeatures(src) {
+        try {
+            var rem = src.getFeatures().filter(function(f) { return f.get('_rfDist'); });
+            rem.forEach(function(f) { src.removeFeature(f); });
+        } catch(e) {}
+    }
+
+    function _rfDrawDistOnMainMap() {
+        if (_distanceZones.length === 0) { _rfClearDistOnMainMap(); return; }
+        try {
+            if (!window.ol || !gReady()) return;
+
+            var src = null; // the ol.source.Vector we will add features to
+
+            // ── Path A: our own dedicated layer ──────────────────────────────
+            if (!_distOLSource) {
+                _distOLSource = new ol.source.Vector({ wrapX: false });
+                _distOLLayer  = new ol.layer.Vector({
+                    source: _distOLSource, zIndex: 9999, renderOrder: null,
+                });
+                var added = false;
+                // Try tar1090's layer collection (let-global `layers` from script.js)
+                try {
+                    if (typeof layers !== 'undefined' && layers &&
+                        typeof layers.push === 'function') {
+                        layers.push(_distOLLayer);
+                        added = true;
+                        console.log('[RF] dist overlay: added via layers.push');
+                    }
+                } catch(e1) { console.warn('[RF] layers.push failed:', e1); }
+                // Try OLMap.addLayer()
+                if (!added) {
+                    try {
+                        var m = _rfOLMap();
+                        if (m) { m.addLayer(_distOLLayer); added = true; console.log('[RF] dist overlay: added via OLMap.addLayer'); }
+                    } catch(e2) { console.warn('[RF] OLMap.addLayer failed:', e2); }
+                }
+                if (!added) {
+                    // Can't add our layer — abandon it
+                    console.warn('[RF] dist overlay: could not add layer, will use siteCircleFeatures fallback');
+                    _distOLSource = null; _distOLLayer = null;
+                }
+            }
+
+            if (_distOLSource) {
+                _distOLSource.clear();
+                src = _distOLSource;
+            }
+
+            // ── Path B: siteCircleFeatures fallback ──────────────────────────
+            // siteCircleFeatures is a let-global in script.js; it is already
+            // attached to siteCircleLayer which is always on the map.
+            if (!src) {
+                try {
+                    if (typeof siteCircleFeatures !== 'undefined' && siteCircleFeatures) {
+                        _rfRemoveDistFeatures(siteCircleFeatures);
+                        src = siteCircleFeatures;
+                        console.log('[RF] dist overlay: using siteCircleFeatures fallback');
+                    }
+                } catch(e3) { console.warn('[RF] siteCircleFeatures fallback failed:', e3); }
+            }
+
+            if (!src) { console.warn('[RF] dist overlay: no source available, giving up'); return; }
+
+            _rfBuildZoneFeatures(src);
+
+            // Force a render pass
+            try { var m2 = _rfOLMap(); if (m2) m2.render(); } catch(e) {}
+
+        } catch(e) { console.warn('[RF] dist OL overlay error:', e, e.stack); }
+    }
+
+    function _rfClearDistOnMainMap() {
+        // Clear from our dedicated source
+        try { if (_distOLSource) _distOLSource.clear(); } catch(e) {}
+        // Clear from siteCircleFeatures fallback
+        try {
+            if (typeof siteCircleFeatures !== 'undefined' && siteCircleFeatures) {
+                _rfRemoveDistFeatures(siteCircleFeatures);
+            }
+        } catch(e) {}
+    }
+
+    window._rfPanToDistZone = function () {
+        try {
+            var map = _rfOLMap();
+            if (_distanceZones.length === 0 || !gReady() || !map || !window.ol) return;
+            // Compute bounding extent covering all active zones
+            var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            _distanceZones.forEach(function(zone) {
+                var c = ol.proj.fromLonLat([zone.lon, zone.lat]);
+                var r = zone.radiusNm * 1852 * 1.35;
+                if (c[0] - r < minX) minX = c[0] - r;
+                if (c[1] - r < minY) minY = c[1] - r;
+                if (c[0] + r > maxX) maxX = c[0] + r;
+                if (c[1] + r > maxY) maxY = c[1] + r;
+            });
+            map.getView().fit([minX, minY, maxX, maxY], { duration: 600, padding: [30, 30, 30, 30] });
+        } catch(e) {}
+    };
+
     window._rfDistRadiusChanged = function(val) {
         _distanceForm.radiusNm = val;
         if (_distMapCircle) {
@@ -2655,19 +3502,39 @@
         _distanceForm[field] = value;
     };
 
-    window._rfDistSelectLoc = function (val) {
-        var idx = parseInt(val, 10);
-        if (isNaN(idx) || idx < 0 || idx >= _distanceLocations.length) {
-            _distanceForm.locationIdx = -1;
-            buildPanel();
-            return;
-        }
+    // Load a saved location into the edit form (doesn't activate it)
+    window._rfDistLoadLoc = function (idx) {
         var loc = _distanceLocations[idx];
+        if (!loc) return;
         _distanceForm.locationIdx  = idx;
         _distanceForm.locationName = loc.name;
         _distanceForm.lat          = String(loc.lat);
         _distanceForm.lon          = String(loc.lon);
         _distanceForm.radiusNm     = String(loc.radiusNm);
+        buildPanel();
+    };
+
+    // Toggle a saved location on/off in the active zones list
+    window._rfDistToggleLoc = function (idx) {
+        var loc = _distanceLocations[idx];
+        if (!loc) return;
+        var existingIdx = -1;
+        for (var i = 0; i < _distanceZones.length; i++) {
+            if (_distanceZones[i].name === loc.name) { existingIdx = i; break; }
+        }
+        if (existingIdx >= 0) {
+            _distanceZones.splice(existingIdx, 1);
+        } else {
+            if (settings.inView) { settings.inView = false; saveSettings(); }
+            _distanceZones.push({
+                lat: loc.lat, lon: loc.lon, radiusNm: loc.radiusNm, name: loc.name,
+                altMode: _distanceForm.altMode,
+                altMin:  parseInt(_distanceForm.altMin,  10) || 0,
+                altMax:  parseInt(_distanceForm.altMax,  10) || 50000,
+            });
+        }
+        _rfPersistDistFilter();
+        applyFilter();
         buildPanel();
     };
 
@@ -2693,15 +3560,37 @@
             _distanceForm.locationIdx    = _distanceLocations.length - 1;
         }
         try { localStorage.setItem(DIST_LS_KEY, JSON.stringify(_distanceLocations)); } catch (e) {}
+        // Add or update in active zones
+        var savedZone = {
+            lat: loc.lat, lon: loc.lon, radiusNm: loc.radiusNm, name: loc.name,
+            altMode: _distanceForm.altMode,
+            altMin:  parseInt(_distanceForm.altMin, 10) || 0,
+            altMax:  parseInt(_distanceForm.altMax, 10) || 50000,
+        };
+        var existingZoneIdx = -1;
+        for (var j = 0; j < _distanceZones.length; j++) {
+            if (_distanceZones[j].name === loc.name) { existingZoneIdx = j; break; }
+        }
+        if (existingZoneIdx >= 0) _distanceZones[existingZoneIdx] = savedZone;
+        else _distanceZones.push(savedZone);
+        if (settings.inView) { settings.inView = false; saveSettings(); }
+        _rfPersistDistFilter();
+        applyFilter();
         buildPanel();
     };
 
-    window._rfDistDeleteLoc = function () {
-        var idx = _distanceForm.locationIdx;
-        if (idx < 0 || idx >= _distanceLocations.length) return;
+    window._rfDistDeleteLoc = function (idx) {
+        if (idx === undefined) idx = _distanceForm.locationIdx;
+        idx = parseInt(idx, 10);
+        if (isNaN(idx) || idx < 0 || idx >= _distanceLocations.length) return;
+        var locName = _distanceLocations[idx].name;
         _distanceLocations.splice(idx, 1);
         _distanceForm.locationIdx = -1;
         try { localStorage.setItem(DIST_LS_KEY, JSON.stringify(_distanceLocations)); } catch (e) {}
+        // Also remove from active zones if it was active
+        _distanceZones = _distanceZones.filter(function(z) { return z.name !== locName; });
+        _rfPersistDistFilter();
+        applyFilter();
         buildPanel();
     };
 
@@ -2731,24 +3620,37 @@
         if (isNaN(lon) || lon < -180 || lon > 180) { alert('Click the map to set a centre point first.'); return; }
         if (isNaN(radius) || radius < 1)           { alert('Enter a valid radius (minimum 1 NM).'); return; }
 
-        _distanceFilter.lat          = lat;
-        _distanceFilter.lon          = lon;
-        _distanceFilter.radiusNm     = radius;
-        _distanceFilter.locationName = _distanceForm.locationName.trim() || (lat.toFixed(4) + ',' + lon.toFixed(4));
-        _distanceFilter.altMode      = _distanceForm.altMode;
-        if (_distanceFilter.altMode === 'between') {
-            _distanceFilter.altMin = parseInt(_distanceForm.altMin, 10) || 0;
-            _distanceFilter.altMax = parseInt(_distanceForm.altMax, 10) || 50000;
+        var zoneName = _distanceForm.locationName.trim() || (lat.toFixed(4) + ', ' + lon.toFixed(4));
+        var newZone = {
+            lat: lat, lon: lon, radiusNm: radius, name: zoneName,
+            altMode: _distanceForm.altMode,
+            altMin:  parseInt(_distanceForm.altMin, 10) || 0,
+            altMax:  parseInt(_distanceForm.altMax, 10) || 50000,
+        };
+        // Replace existing zone with same name, or push a new one
+        var existingApplyIdx = -1;
+        for (var k = 0; k < _distanceZones.length; k++) {
+            if (_distanceZones[k].name === zoneName) { existingApplyIdx = k; break; }
         }
-        _distanceFilter.active = true;
-        console.log('[RF] Distance filter applied:', JSON.stringify(_distanceFilter));
-        console.log('[RF] isFilterActive:', isFilterActive(), '| customFilter:', typeof window.customFilter);
+        if (existingApplyIdx >= 0) _distanceZones[existingApplyIdx] = newZone;
+        else _distanceZones.push(newZone);
+        // In-view restriction would hide planes that are within range but panned off screen.
+        if (settings.inView) { settings.inView = false; saveSettings(); }
+        _rfPersistDistFilter();
         applyFilter();
         buildPanel();
     };
 
     window._rfDistClear = function () {
-        _distanceFilter.active = false;
+        _distanceZones = [];
+        _rfPersistDistFilter();
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfDistRemoveZone = function (idx) {
+        _distanceZones.splice(idx, 1);
+        _rfPersistDistFilter();
         applyFilter();
         buildPanel();
     };
@@ -2770,7 +3672,8 @@
         _alertsMapFilter      = false;
         _alertsMapFilterIcaos = null;
         _alertsSelectedIcaos.clear();
-        _distanceFilter.active = false;
+        _distanceZones = [];
+        _sumFilter.clear();
         applyFilter();
         buildPanel();
     };
@@ -2889,11 +3792,50 @@
             }
         } catch (e) {}
         try {
+            var ssv = localStorage.getItem(SUMMARY_SETTINGS_KEY);
+            if (ssv) {
+                var ssp = JSON.parse(ssv);
+                Object.keys(_summarySettings).forEach(function (k) {
+                    if (ssp.hasOwnProperty(k)) _summarySettings[k] = !!ssp[k];
+                });
+            }
+        } catch (e) {}
+        // Apply the persisted default scope to the session variable
+        _summaryInView = !!_summarySettings.defaultInView;
+        try {
             var distSaved = localStorage.getItem(DIST_LS_KEY);
             if (distSaved) _distanceLocations = JSON.parse(distSaved) || [];
         } catch (e) { _distanceLocations = []; }
+        try {
+            var distZonesRaw = localStorage.getItem(DIST_ZONES_KEY);
+            if (distZonesRaw) {
+                var dz = JSON.parse(distZonesRaw);
+                if (Array.isArray(dz) && dz.length > 0) {
+                    _distanceZones = dz.filter(function(z) {
+                        return z && typeof z.lat === 'number' && typeof z.lon === 'number' && z.radiusNm > 0;
+                    });
+                    // Pre-populate the form with the first zone
+                    if (_distanceZones.length > 0) {
+                        var fz = _distanceZones[0];
+                        _distanceForm.lat          = String(fz.lat);
+                        _distanceForm.lon          = String(fz.lon);
+                        _distanceForm.radiusNm     = String(fz.radiusNm);
+                        _distanceForm.locationName = fz.name || '';
+                        _distanceForm.altMode      = fz.altMode || 'all';
+                        _distanceForm.altMin       = String(fz.altMin || 0);
+                        _distanceForm.altMax       = String(fz.altMax || 50000);
+                    }
+                }
+            }
+        } catch(e) { _distanceZones = []; }
 
         installFilterHook();
+
+        // If distance zones were restored from localStorage, draw their rings on the map.
+        // Short delay ensures the OL map and layers are fully initialised.
+        if (_distanceZones.length > 0) {
+            setTimeout(_rfDrawDistOnMainMap, 800);
+        }
 
         // Apply initial tab visibility
         Object.keys(_tabVisibility).forEach(function (k) {
@@ -2925,12 +3867,12 @@
                     // Only update the status count
                     var statusEl2 = document.getElementById('rf-status');
                     if (statusEl2 && gReady()) {
-                        if (_distanceFilter.active) {
+                        if (_distanceZones.length > 0) {
                             var cnt2 = 0;
                             for (var ti = 0; ti < g.planesOrdered.length; ti++) {
                                 if (planePassesDistanceFilter(g.planesOrdered[ti])) cnt2++;
                             }
-                            statusEl2.textContent = cnt2 + ' aircraft in zone';
+                            statusEl2.textContent = cnt2 + ' aircraft in zone' + (_distanceZones.length > 1 ? 's' : '');
                         } else {
                             statusEl2.textContent = '';
                         }

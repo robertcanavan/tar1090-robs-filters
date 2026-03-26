@@ -6,6 +6,7 @@
  */
 (function () {
     'use strict';
+    var RF_BUILD = '2026-03-26a';
 
     // ── State ─────────────────────────────────────────────────────────────────
     // Each tab has its own independent filter state. All active tabs are AND-ed.
@@ -23,10 +24,22 @@
     };
 
     // Module-level settings (not part of tab filter state)
-    const settings = { inView: true, displayMode: 'sidebar', sidebarSide: 'right', useLocalDb: true };
+    const settings = {
+        displayMode: 'sidebar',
+        sidebarSide: 'right',
+        useLocalDb: true,
+        routeKnownOnly: true,
+        hideAllScope: true,
+        homeOverride: false,
+        homeLat: '',
+        homeLon: '',
+        homeZoom: 12,
+    };
 
     // ResizeObserver / MutationObserver refs - cleaned up when leaving sidebar mode
     var _rfObservers = [];
+    var _rfMapResizeTimer = null;
+    var _rfMapInsetState = null;
 
     // ── Local database constants ──────────────────────────────────────────────
     var DB_AIRPORTS_URL    = 'https://raw.githubusercontent.com/davidmegginson/ourairports-data/main/airports.csv';
@@ -54,7 +67,14 @@
     // ── Per-tab visibility (persisted) ────────────────────────────────────────
     var TAB_VIS_KEY    = 'rf_tab_vis_v1';
     var SETTINGS_KEY   = 'rf_settings_v1';
-    var _tabVisibility = { summary: true, airports: true, countries: true, operators: true, aircraft: true, alerts: true, distance: true };
+    var HOME_KEY       = 'rf_home_v1';
+    var VIEWS_KEY      = 'rf_views_v1';
+    var PERSIST_COOKIE_KEY = 'rf_persist_v1';
+    var HOME_COOKIE_KEY = 'rf_home_cookie_v1';
+    var _tabVisibility = { summary: true, airports: true, countries: true, operators: true, aircraft: true, views: true, alerts: true, distance: true };
+    var _savedViews = [];
+    var _activeViewId = '';
+    var _rfQuickSelectedViewId = '';
 
     // ── Summary section visibility (persisted) ────────────────────────────────
     var SUMMARY_SETTINGS_KEY = 'rf_sum_settings_v1';
@@ -72,16 +92,32 @@
         arrivals:      true,   // Recent arrivals (appeared in last 5 min)
         countries:     true,   // Countries visible (from registration prefix)
         slowest:       true,   // Slowest airborne aircraft (> 30 kt)
-        defaultInView: false,  // Default scope: false = all aircraft, true = in map view
     };
 
-    // Session-level summary scope toggle. Starts at the persisted default.
-    // Does NOT persist itself — resets to defaultInView on each page load.
-    var _summaryInView = false;
+    // Runtime panel scope used by all tabs (does not clear filters):
+    //  - all:      all aircraft currently received
+    //  - inview:   only aircraft currently in map viewport
+    //  - filtered: only aircraft that pass all currently applied filters
+    var _panelScope = 'all';
 
     // Quick-filter set populated by clicking items on the Summary tab.
     // When non-empty only these ICAOs are shown on the map.
     var _sumFilter = new Set();
+
+    // Indexed click-data array: onclick uses window._rfSumFilterIdx(n) instead of
+    // embedding JSON directly in HTML attributes (double-quotes would break the attribute).
+    var _sumClickData = [];
+
+    // Saved OL map view before a filter-driven auto-pan so we can restore it on clear.
+    var _mapViewSaved = null;
+    // Saved OL map view before global cross-tab auto-fit starts.
+    var _autoFitSavedView = null;
+    // One-time recenter on first RF panel open.
+    var _rfDidInitialHomeCenter = false;
+    // Home pick mode state (click map to set home).
+    var _rfHomePickHandler = null;
+    var _rfCookieOk = null;
+    var _rfLocalStorageOk = null;
 
     // Tracks first-seen timestamp per ICAO for "Recent Arrivals" section.
     // {icao: timestampMs} — pruned each refresh to only include current planes.
@@ -94,12 +130,18 @@
     var _alertsError     = null;
     var _alertsMoreInfo  = null;  // icao string of currently shown more-info card, or null
     // Filter state for alerts tab (separate from tabState - doesn't cross-filter other tabs)
-    var _alertsFilters        = { cmpg: '', category: '', tag: '', liveOnly: true };
+    var _alertsFilters        = { cmpg: '', category: '', tag: '' };
     // Map filter: when true, only planes whose ICAO is in the filtered alerts DB are shown
     var _alertsMapFilter      = false;
     var _alertsMapFilterIcaos = null; // pre-built Set<ICAO> for efficient isFiltered checks
     // Selected ICAOs: clicking a row adds/removes; takes priority over broad map filter
     var _alertsSelectedIcaos  = new Set();
+    // Lightweight photo cache for alerts cards (icao -> thumbnail url)
+    // (currently unused in basic alerts mode, kept for future opt-in enrichments)
+    var _alertsPhotoCache     = {};
+    var _alertsPhotoInflight  = {};
+    // Per-render indexed click data for Alerts tab (avoids fragile inline quoting).
+    var _alertsClickData      = [];
 
     // ── Distance filter state ─────────────────────────────────────────────────
     var _distMap = null;          // Leaflet map instance (mini-map in panel)
@@ -112,10 +154,16 @@
 
     var DIST_LS_KEY        = 'rf_dist_locs_v1';
     var DIST_ZONES_KEY     = 'rf_dist_zones_v2';      // persists active zones array
+    var DIST_MODE_KEY      = 'rf_dist_mode_v1';       // inside | outside | maponly
     var _distanceLocations = [];  // [{name, lat, lon, radiusNm}] persisted in localStorage
     // Active zones array — multiple zones with OR logic
     // Each zone: {lat, lon, radiusNm, name, altMode, altMin, altMax}
     var _distanceZones     = [];
+    // Distance behavior mode:
+    //  inside  = include aircraft inside any zone
+    //  outside = include aircraft outside all zones
+    //  maponly = do not filter aircraft, only show zone overlay on map
+    var _distanceMode      = 'inside';
     // Form working state -- tracks what the user is currently typing
     // Used to repopulate the form on auto-refresh without wiping edits
     var _distanceForm = {
@@ -137,7 +185,7 @@
         if (ac.catFilter.size > 0 || ac.regCountryFilter !== '') return true;
         if (_alertsSelectedIcaos.size > 0) return true;
         if (_alertsMapFilter && _alertsMapFilterIcaos) return true;
-        if (_distanceZones.length > 0) return true;
+        if (_distanceZones.length > 0 && _distanceMode !== 'maponly') return true;
         if (_sumFilter.size > 0) return true;
         return Object.values(state.tabState).some(function(s) { return s.items.size > 0; });
     }
@@ -570,8 +618,9 @@
 
             // Cross-tab filter: skip planes that don't pass other tabs' active filters
             if (!planePassesAllFilters(plane, excludeTab)) continue;
-            // In-view filter
-            if (settings.inView && !plane.inView) continue;
+            // Runtime scope filter (all / inview / filtered)
+            if (_panelScope === 'inview' && !plane.inView) continue;
+            if (_panelScope === 'filtered' && !planePassesAllFilters(plane, null)) continue;
 
             // Aircraft tab: typeKey = typeLong if available, else icaoType
             // Skip surface vehicles (ADS-B category C0-C3 = ground/surface)
@@ -835,6 +884,7 @@
 
     function planePassesDistanceFilter(plane) {
         if (_distanceZones.length === 0) return true;
+        if (_distanceMode === 'maponly') return true;
         // tar1090 stores position as plane.position = [lon, lat] (OL convention).
         // plane.lat / plane.lon do NOT exist on PlaneObject — always use .position.
         var plat, plon;
@@ -846,7 +896,8 @@
             plon = +plane.lon;
         }
         if (isNaN(plat) || isNaN(plon)) return true; // no position — show plane
-        // Pass if within ANY active zone (OR logic)
+        // Test if plane is within ANY active zone (OR logic)
+        var insideAny = false;
         for (var zi = 0; zi < _distanceZones.length; zi++) {
             var zone = _distanceZones[zi];
             var dist = haversineNm(zone.lat, zone.lon, plat, plon);
@@ -857,9 +908,10 @@
                         : typeof plane.alt_baro === 'number' ? plane.alt_baro : null);
                 if (alt !== null && (alt < zone.altMin || alt > zone.altMax)) continue;
             }
-            return true; // within this zone
+            insideAny = true;
+            break;
         }
-        return false; // outside all active zones
+        return _distanceMode === 'outside' ? !insideAny : insideAny;
     }
 
     // ── Cross-tab filter helper ───────────────────────────────────────────────
@@ -897,7 +949,6 @@
     // ── Filter function (shared logic used by both hook methods) ─────────────
     function rfIsFiltered(plane) {
         if (!isFilterActive()) return false;
-        if (settings.inView && !plane.inView) return true;
         return !planePassesAllFilters(plane, null);
     }
 
@@ -948,6 +999,309 @@
         } catch (e) { console.warn('[RF] triggerRedraw error:', e); }
     }
 
+    function _rfScopeLabel() {
+        return _panelScope === 'inview' ? 'in view' : (_panelScope === 'filtered' ? 'filtered' : 'all');
+    }
+    function _rfScopeBadgeLabel() {
+        return _panelScope === 'inview' ? 'In View' : (_panelScope === 'filtered' ? 'Filtered' : 'All');
+    }
+
+    function _rfEscText(s) {
+        return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    }
+    function _rfEscAttr(s) {
+        return _rfEscText(s).replace(/"/g, '&quot;');
+    }
+
+    function _rfDefaultViewMap() {
+        return {
+            enabled: false,
+            mode: 'dynamic', // dynamic | fixed
+            autoCenter: true,
+            autoZoom: true,
+            fixedCenterLat: null,
+            fixedCenterLon: null,
+            fixedZoom: null,
+        };
+    }
+
+    function _rfNormalizeViewMap(mapCfg) {
+        var d = _rfDefaultViewMap();
+        var m = (mapCfg && typeof mapCfg === 'object') ? mapCfg : {};
+        return {
+            enabled: !!m.enabled,
+            mode: (m.mode === 'fixed') ? 'fixed' : 'dynamic',
+            autoCenter: (typeof m.autoCenter === 'boolean') ? m.autoCenter : true,
+            autoZoom: (typeof m.autoZoom === 'boolean') ? m.autoZoom : true,
+            fixedCenterLat: (typeof m.fixedCenterLat === 'number' && !isNaN(m.fixedCenterLat)) ? m.fixedCenterLat : d.fixedCenterLat,
+            fixedCenterLon: (typeof m.fixedCenterLon === 'number' && !isNaN(m.fixedCenterLon)) ? m.fixedCenterLon : d.fixedCenterLon,
+            fixedZoom: (typeof m.fixedZoom === 'number' && !isNaN(m.fixedZoom)) ? m.fixedZoom : d.fixedZoom,
+        };
+    }
+
+    function _rfEnsureViewShape(v) {
+        if (!v || typeof v !== 'object') return;
+        v.map = _rfNormalizeViewMap(v.map);
+    }
+
+    function _rfGetCurrentMapSnapshot() {
+        var m = _rfOLMap();
+        if (!m || !m.getView) return null;
+        var v = m.getView();
+        var c = v.getCenter();
+        var ll = _rfLonLatFromMapCoord(c);
+        if (!ll) return null;
+        return {
+            lat: ll.lat,
+            lon: ll.lon,
+            zoom: v.getZoom(),
+        };
+    }
+
+    function _rfTabStateToPlain() {
+        var out = {};
+        Object.keys(state.tabState).forEach(function(tab) {
+            var src = state.tabState[tab];
+            out[tab] = {
+                items: Array.from(src.items || []),
+                direction: src.direction || 'both',
+                sortBy: src.sortBy || 'count',
+                sortDir: src.sortDir || 'desc',
+            };
+            if (tab === 'aircraft') {
+                out[tab].catFilter = Array.from(src.catFilter || []);
+                out[tab].regCountryFilter = src.regCountryFilter || '';
+            }
+        });
+        return out;
+    }
+
+    function _rfApplyTabStatePlain(plain) {
+        if (!plain || typeof plain !== 'object') return;
+        Object.keys(state.tabState).forEach(function(tab) {
+            var src = plain[tab];
+            if (!src) return;
+            var dst = state.tabState[tab];
+            dst.items = new Set(Array.isArray(src.items) ? src.items : []);
+            if (tab === 'airports' || tab === 'countries') {
+                dst.direction = (src.direction === 'from' || src.direction === 'to' || src.direction === 'both') ? src.direction : 'both';
+            }
+            dst.sortBy = (src.sortBy === 'name' || src.sortBy === 'count') ? src.sortBy : dst.sortBy;
+            dst.sortDir = (src.sortDir === 'asc' || src.sortDir === 'desc') ? src.sortDir : dst.sortDir;
+            if (tab === 'aircraft') {
+                dst.catFilter = new Set(Array.isArray(src.catFilter) ? src.catFilter : []);
+                dst.regCountryFilter = String(src.regCountryFilter || '');
+            }
+        });
+    }
+
+    function _rfCaptureViewState() {
+        return {
+            panelScope: _panelScope,
+            tabState: _rfTabStateToPlain(),
+            alerts: {
+                filters: {
+                    cmpg: _alertsFilters.cmpg || '',
+                    category: _alertsFilters.category || '',
+                    tag: _alertsFilters.tag || '',
+                },
+                mapFilter: !!_alertsMapFilter,
+                selectedIcaos: Array.from(_alertsSelectedIcaos || []),
+            },
+            distance: {
+                zones: JSON.parse(JSON.stringify(_distanceZones || [])),
+                mode: _distanceMode,
+            },
+            summary: {
+                sumFilter: Array.from(_sumFilter || []),
+            },
+            map: _rfDefaultViewMap(),
+        };
+    }
+
+    function _rfApplyViewState(vs) {
+        if (!vs || typeof vs !== 'object') return false;
+        if (vs.panelScope === 'all' || vs.panelScope === 'inview' || vs.panelScope === 'filtered') {
+            _panelScope = (settings.hideAllScope && vs.panelScope === 'all') ? 'inview' : vs.panelScope;
+        }
+        _rfApplyTabStatePlain(vs.tabState || {});
+
+        var af = (vs.alerts && vs.alerts.filters) || {};
+        _alertsFilters.cmpg = String(af.cmpg || '');
+        _alertsFilters.category = String(af.category || '');
+        _alertsFilters.tag = String(af.tag || '');
+        _alertsMapFilter = !!(vs.alerts && vs.alerts.mapFilter);
+        _alertsSelectedIcaos = new Set((vs.alerts && Array.isArray(vs.alerts.selectedIcaos)) ? vs.alerts.selectedIcaos : []);
+        buildAlertsMapFilterSet();
+
+        if (vs.distance && Array.isArray(vs.distance.zones)) {
+            _distanceZones = vs.distance.zones.filter(function(z) {
+                return z && typeof z.lat === 'number' && typeof z.lon === 'number' && z.radiusNm > 0;
+            });
+        } else {
+            _distanceZones = [];
+        }
+        if (vs.distance && (vs.distance.mode === 'inside' || vs.distance.mode === 'outside' || vs.distance.mode === 'maponly')) {
+            _distanceMode = vs.distance.mode;
+        }
+        _rfPersistDistFilter();
+
+        _sumFilter.clear();
+        var sf = vs.summary && Array.isArray(vs.summary.sumFilter) ? vs.summary.sumFilter : [];
+        sf.forEach(function(ic) { _sumFilter.add(String(ic || '').toUpperCase()); });
+        return true;
+    }
+
+    function _rfPersistViews() {
+        try { localStorage.setItem(VIEWS_KEY, JSON.stringify(_savedViews)); } catch (e) {}
+        _rfSavePersistBackup();
+    }
+
+    function _rfViewsOptionsHtml() {
+        var h = '<option value="">Views</option>';
+        for (var i = 0; i < _savedViews.length; i++) {
+            var v = _savedViews[i];
+            _rfEnsureViewShape(v);
+            h += '<option value="' + _rfEscAttr(v.id) + '"' + (_activeViewId === v.id ? ' selected' : '') + '>' + _rfEscText(v.name || ('View ' + (i + 1))) + '</option>';
+        }
+        return h;
+    }
+
+    function _rfFindViewById(id) {
+        for (var i = 0; i < _savedViews.length; i++) {
+            if (_savedViews[i] && _savedViews[i].id === id) return _savedViews[i];
+        }
+        return null;
+    }
+
+    function _rfGetActiveView() {
+        if (!_activeViewId) return null;
+        return _rfFindViewById(_activeViewId);
+    }
+
+    function _rfApplyMapBehaviorConfig(mapCfg, forceNow) {
+        var cfg = _rfNormalizeViewMap(mapCfg);
+        if (!cfg.enabled) return;
+        var m = _rfOLMap();
+        if (!m || !m.getView) return;
+        var v = m.getView();
+        if (cfg.mode === 'fixed') {
+            if (cfg.fixedCenterLat === null || cfg.fixedCenterLon === null || cfg.fixedZoom === null) return;
+            var fc = _rfMapCoordFromLonLat(cfg.fixedCenterLon, cfg.fixedCenterLat);
+            if (!fc) return;
+            v.animate({ center: fc, zoom: cfg.fixedZoom, duration: forceNow ? 650 : 500 });
+            return;
+        }
+        if (!cfg.autoCenter && !cfg.autoZoom) return;
+        _rfAutoFitFilteredPlanes({
+            autoCenter: cfg.autoCenter,
+            autoZoom: cfg.autoZoom,
+            forceNow: !!forceNow,
+        });
+    }
+
+    function _rfDetectHomePos() {
+        try {
+            if (typeof SiteLat !== 'undefined' && typeof SiteLon !== 'undefined') {
+                var slat = +SiteLat, slon = +SiteLon;
+                if (!isNaN(slat) && !isNaN(slon) && Math.abs(slat) <= 90 && Math.abs(slon) <= 180) {
+                    return { lat: slat, lon: slon, source: 'tar1090 site' };
+                }
+            }
+        } catch (e) {}
+        try {
+            if (typeof g !== 'undefined' && g.SitePosition) {
+                var glat = +g.SitePosition.lat, glon = +g.SitePosition.lng;
+                if (!isNaN(glat) && !isNaN(glon) && Math.abs(glat) <= 90 && Math.abs(glon) <= 180) {
+                    return { lat: glat, lon: glon, source: 'g.SitePosition' };
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function _rfGetHomeConfig() {
+        var detected = _rfDetectHomePos();
+        var lat = detected ? detected.lat : null;
+        var lon = detected ? detected.lon : null;
+        var src = detected ? detected.source : 'not detected';
+        if (settings.homeOverride) {
+            var olat = parseFloat(settings.homeLat), olon = parseFloat(settings.homeLon);
+            if (!isNaN(olat) && !isNaN(olon) && Math.abs(olat) <= 90 && Math.abs(olon) <= 180) {
+                lat = olat; lon = olon; src = 'override';
+            }
+        }
+        var z = parseInt(settings.homeZoom, 10);
+        if (isNaN(z)) z = 12;
+        if (z < 2) z = 2;
+        if (z > 19) z = 19;
+        return { lat: lat, lon: lon, zoom: z, source: src, detected: detected };
+    }
+
+    function _rfCenterHome(useConfiguredZoom) {
+        var m = _rfOLMap();
+        if (!m || !m.getView) return;
+        var hc = _rfGetHomeConfig();
+        if (hc.lat === null || hc.lon === null) return;
+        var c = _rfMapCoordFromLonLat(hc.lon, hc.lat);
+        if (!c) return;
+        var v = m.getView();
+        var targetZoom = useConfiguredZoom ? hc.zoom : Math.max(v.getZoom(), hc.zoom);
+        v.animate({ center: c, zoom: targetZoom, duration: 700 });
+    }
+
+    function _rfScopeToggleHtml() {
+        var btns = [];
+        btns.push('<button class="rf-sum-scope-btn rf-scope-home-btn" onclick="window._rfCenterHome(true)" title="Center map on home position">\u2302</button>');
+        if (!settings.hideAllScope) {
+            btns.push('<button class="rf-sum-scope-btn' + (_panelScope === 'all' ? ' rf-sum-scope-active' : '') + '" ' +
+                'onclick="window._rfSetPanelScope(\'all\')" title="Include all currently loaded aircraft">All aircraft</button>');
+        }
+        btns.push('<button class="rf-sum-scope-btn' + (_panelScope === 'inview' ? ' rf-sum-scope-active' : '') + '" ' +
+            'onclick="window._rfSetPanelScope(\'inview\')" title="Only aircraft visible in the current map viewport">In map view</button>');
+        btns.push('<button class="rf-sum-scope-btn' + (_panelScope === 'filtered' ? ' rf-sum-scope-active' : '') + '" ' +
+            'onclick="window._rfSetPanelScope(\'filtered\')" title="Only aircraft matching active filters">Filtered view</button>');
+        return '<div class="rf-sum-scope-wrap">' +
+            '<div class="rf-sum-scope-btns">' + btns.join('') + '</div>' +
+        '</div>';
+    }
+
+    function _rfRenderScopeHeader() {
+        var el = document.getElementById('rf-scope-global');
+        if (el) el.innerHTML = _rfScopeToggleHtml();
+        _rfRenderViewQuickMenu();
+    }
+
+    function _rfRenderViewQuickMenu() {
+        var el = document.getElementById('rf-view-quick-menu');
+        if (!el) return;
+        var av = _rfGetActiveView();
+        var badge = '<div class="rf-active-view-badge-empty">No active view</div>';
+        if (av) {
+            _rfEnsureViewShape(av);
+            var modeLbl = !av.map.enabled ? 'Map Off' : (av.map.mode === 'fixed' ? 'Map Fixed' : 'Map Dynamic');
+            badge = '<div class="rf-active-view-badge" title="Active view: ' + _rfEscAttr(av.name || '') + '">' +
+                '<span class="rf-active-view-name">' + _rfEscText(av.name || 'View') + '</span>' +
+                '<span class="rf-active-view-mode">' + modeLbl + '</span></div>';
+        }
+        if (!_rfQuickSelectedViewId) _rfQuickSelectedViewId = _activeViewId || '';
+        var opt = '<option value="">Select view...</option>';
+        for (var i = 0; i < _savedViews.length; i++) {
+            var v = _savedViews[i];
+            _rfEnsureViewShape(v);
+            opt += '<option value="' + _rfEscAttr(v.id) + '"' + (_rfQuickSelectedViewId === v.id ? ' selected' : '') + '>' + _rfEscText(v.name || ('View ' + (i + 1))) + '</option>';
+        }
+        el.innerHTML =
+            '<div class="rf-view-quick-head">Views</div>' +
+            badge +
+            '<select class="rf-views-select rf-views-select-compact" onchange="window._rfViewsQuickPick(this.value)">' + opt + '</select>' +
+            '<div class="rf-view-quick-actions">' +
+            '<button class="rf-cat-btn" onclick="window._rfViewsApplyQuick()">Apply</button>' +
+            '<button class="rf-cat-btn" onclick="window._rfViewsSavePrompt()">Save Current</button>' +
+            '<button class="rf-cat-btn" onclick="window._rfSwitchTab(\'views\');window._rfToggleViewQuickMenu(false)">Manage</button>' +
+            '</div>';
+    }
+
     function applyFilter() {
         triggerRedraw();
         // Keep the main-map ring in sync with the active filter state
@@ -956,6 +1310,11 @@
         } else {
             _rfClearDistOnMainMap();
         }
+        // Map behavior: active view controls auto-center/zoom, else fallback to legacy behavior.
+        var av = _rfGetActiveView();
+        if (av && av.map) _rfApplyMapBehaviorConfig(av.map, true);
+        else _rfAutoFitFilteredPlanes();
+        _rfRenderScopeHeader();
     }
 
     // ── Breadcrumb generation ─────────────────────────────────────────────────
@@ -1019,8 +1378,9 @@
             );
         }
 
-        // Alerts chip: row selection takes priority over broad map filter
+        // Alerts chip: row selection takes priority; facets are shown even without map filter.
         var alActive = state.activeTab === 'alerts' ? ' rf-chip-active' : '';
+        var alFacetActive = !!(_alertsFilters.cmpg || _alertsFilters.category || _alertsFilters.tag);
         if (_alertsSelectedIcaos.size > 0) {
             var alSummary = _alertsSelectedIcaos.size === 1
                 ? Array.from(_alertsSelectedIcaos)[0]
@@ -1032,17 +1392,18 @@
                 '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfClearAlerts()">&#x2715;</button>' +
                 '</div>'
             );
-        } else if (_alertsMapFilter && _alertsMapFilterIcaos) {
+        } else if (alFacetActive || (_alertsMapFilter && _alertsMapFilterIcaos)) {
             var alParts = [];
             if (_alertsFilters.cmpg)     alParts.push(_alertsFilters.cmpg);
             if (_alertsFilters.category) alParts.push(_alertsFilters.category);
             if (_alertsFilters.tag)      alParts.push(_alertsFilters.tag);
-            var alSummary2 = (alParts.length > 0 ? alParts.join(' + ') : 'All alerts') + ' (' + _alertsMapFilterIcaos.size + ')';
+            var alSummary2 = alParts.length > 0 ? alParts.join(' + ') : 'All alerts';
+            if (_alertsMapFilter && _alertsMapFilterIcaos) alSummary2 += ' (' + _alertsMapFilterIcaos.size + ')';
             chips.push(
                 '<div class="rf-chip' + alActive + '" onclick="window._rfSwitchTab(\'alerts\')" title="Click to open Alerts tab">' +
                 '<span class="rf-chip-label">Alerts</span>' +
                 '<span class="rf-chip-items">' + alSummary2.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>' +
-                '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfToggleAlertsMap(false)">&#x2715;</button>' +
+                '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfClearAlertsFacets()">&#x2715;</button>' +
                 '</div>'
             );
         }
@@ -1173,20 +1534,12 @@
     // ── Build the pre-filtered ICAO set used by isFiltered ───────────────────
     function buildAlertsMapFilterSet() {
         if (!_alertsMapFilter || !_alertsDb) { _alertsMapFilterIcaos = null; return; }
-        // Build live set when liveOnly is on so the map filter also respects it
-        var liveSet = new Set();
-        if (_alertsFilters.liveOnly && gReady()) {
-            for (var li = 0; li < g.planesOrdered.length; li++) {
-                if (g.planesOrdered[li].icao) liveSet.add(g.planesOrdered[li].icao.toUpperCase());
-            }
-        }
         var set = new Set();
         _alertsDb.forEach(function(a) {
             var icao = a.icao.toUpperCase();
             if (_alertsFilters.cmpg     && a.cmpg     !== _alertsFilters.cmpg)                                                             return;
             if (_alertsFilters.category && a.category !== _alertsFilters.category)                                                          return;
             if (_alertsFilters.tag      && a.tag1 !== _alertsFilters.tag && a.tag2 !== _alertsFilters.tag && a.tag3 !== _alertsFilters.tag) return;
-            if (_alertsFilters.liveOnly && !liveSet.has(icao))                                                                             return;
             set.add(icao);
         });
         _alertsMapFilterIcaos = set;
@@ -1197,215 +1550,206 @@
         buildBreadcrumb();
         var searchEl = document.getElementById('rf-search');
         if (searchEl) searchEl.style.display = '';
-
         var ctrlEl   = document.getElementById('rf-controls');
         var hdrEl    = document.getElementById('rf-colheader');
         var listEl   = document.getElementById('rf-list');
         var statusEl = document.getElementById('rf-status');
 
         if (!_tabVisibility.alerts) {
-            if (ctrlEl)   ctrlEl.innerHTML  = '';
-            if (hdrEl)    hdrEl.innerHTML   = '';
-            if (listEl)   listEl.innerHTML  = '<div class="rf-empty">Alerts tab is disabled.<br>Enable it in \u2699 Settings.</div>';
+            if (ctrlEl) ctrlEl.innerHTML = '';
+            if (hdrEl)  hdrEl.innerHTML = '';
+            if (listEl) listEl.innerHTML = '<div class="rf-empty">Alerts tab is disabled.<br>Enable it in \u2699 Settings.</div>';
             if (statusEl) statusEl.textContent = '';
             return;
         }
         if (_alertsFetching) {
-            if (ctrlEl)   ctrlEl.innerHTML  = '';
-            if (hdrEl)    hdrEl.innerHTML   = '';
-            if (listEl)   listEl.innerHTML  = '<div class="rf-empty">Loading plane-alert-db\u2026</div>';
+            if (ctrlEl) ctrlEl.innerHTML = '';
+            if (hdrEl)  hdrEl.innerHTML = '';
+            if (listEl) listEl.innerHTML = '<div class="rf-empty">Loading plane-alert-db\u2026</div>';
             if (statusEl) statusEl.textContent = '';
             return;
         }
         if (!_alertsDb && _alertsError) {
-            if (ctrlEl)   ctrlEl.innerHTML  = '';
-            if (hdrEl)    hdrEl.innerHTML   = '';
-            if (listEl)   listEl.innerHTML  = '<div class="rf-empty">Failed to load: ' + _alertsError + '<br><button class="rf-cat-btn" style="margin-top:8px" onclick="window._rfAlertsRefresh()">Retry</button></div>';
+            if (ctrlEl) ctrlEl.innerHTML = '';
+            if (hdrEl)  hdrEl.innerHTML = '';
+            if (listEl) listEl.innerHTML = '<div class="rf-empty">Failed to load: ' + _alertsError + '<br><button class="rf-cat-btn" style="margin-top:8px" onclick="window._rfAlertsRefresh()">Retry</button></div>';
             if (statusEl) statusEl.textContent = '';
             return;
         }
         if (!_alertsDb) {
             loadAlerts(false);
-            if (ctrlEl)   ctrlEl.innerHTML  = '';
-            if (hdrEl)    hdrEl.innerHTML   = '';
-            if (listEl)   listEl.innerHTML  = '<div class="rf-empty">Loading\u2026</div>';
+            if (ctrlEl) ctrlEl.innerHTML = '';
+            if (hdrEl)  hdrEl.innerHTML = '';
+            if (listEl) listEl.innerHTML = '<div class="rf-empty">Loading\u2026</div>';
             if (statusEl) statusEl.textContent = '';
             return;
         }
+        if (!listEl) return;
 
-        function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+        function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+        function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
+        if (hdrEl) hdrEl.innerHTML = '';
 
-        // Build live ICAO set
+        // Live ICAOs currently present on map
         var liveIcaos = new Set();
         if (gReady()) {
-            for (var pi = 0; pi < g.planesOrdered.length; pi++) {
-                if (g.planesOrdered[pi].icao) liveIcaos.add(g.planesOrdered[pi].icao.toUpperCase());
+            for (var li = 0; li < g.planesOrdered.length; li++) {
+                if (g.planesOrdered[li].icao) liveIcaos.add(g.planesOrdered[li].icao.toUpperCase());
             }
         }
 
-        // Populate filter dropdowns from the full DB
+        // Facet values
         var cmpgSet = new Set(), catSet = new Set(), tagSet = new Set();
         _alertsDb.forEach(function(a) {
-            if (a.cmpg)     cmpgSet.add(a.cmpg);
+            if (a.cmpg) cmpgSet.add(a.cmpg);
             if (a.category) catSet.add(a.category);
             [a.tag1, a.tag2, a.tag3].forEach(function(t) { if (t) tagSet.add(t); });
         });
-        function makeSelect(id, placeholder, valSet, cur, handler) {
-            var html = '<select class="rf-country-select" id="' + id + '" onchange="' + handler + '">';
-            html += '<option value="">' + placeholder + '</option>';
-            Array.from(valSet).sort().forEach(function(v) {
-                html += '<option value="' + v.replace(/"/g,'&quot;') + '"' + (cur === v ? ' selected' : '') + '>' + v + '</option>';
+        function makeSelect(id, title, vals, cur) {
+            var h = '<select class="rf-country-select" id="' + id + '"><option value="">' + title + '</option>';
+            Array.from(vals).sort().forEach(function(v) {
+                h += '<option value="' + escAttr(v) + '"' + (cur === v ? ' selected' : '') + '>' + esc(v) + '</option>';
             });
-            return html + '</select>';
+            return h + '</select>';
         }
-
-        // Controls: dropdowns row + checkboxes row
         if (ctrlEl) {
             ctrlEl.innerHTML =
                 '<div class="rf-alerts-filters">' +
-                makeSelect('rf-al-cmpg', 'All Types',      cmpgSet, _alertsFilters.cmpg,     'window._rfAlertsFilter()') +
-                makeSelect('rf-al-cat',  'All Categories', catSet,  _alertsFilters.category, 'window._rfAlertsFilter()') +
-                makeSelect('rf-al-tag',  'All Tags',       tagSet,  _alertsFilters.tag,      'window._rfAlertsFilter()') +
+                    makeSelect('rf-al-cmpg', 'All Types', cmpgSet, _alertsFilters.cmpg) +
+                    makeSelect('rf-al-cat',  'All Categories', catSet, _alertsFilters.category) +
+                    makeSelect('rf-al-tag',  'All Tags', tagSet, _alertsFilters.tag) +
                 '</div>' +
                 '<div class="rf-alerts-checks">' +
-                '<label class="rf-alerts-live-label"><input type="checkbox" id="rf-al-live"' +
-                (_alertsFilters.liveOnly ? ' checked' : '') + ' onchange="window._rfAlertsFilter()"> Live only</label>' +
-                '<button class="rf-cat-btn' + (_alertsMapFilter ? ' rf-cat-active rf-alerts-mapfilter-btn' : ' rf-alerts-mapfilter-btn') + '"' +
-                ' onclick="window._rfToggleAlertsMap(' + (!_alertsMapFilter) + ')">' +
-                (_alertsMapFilter ? 'Map Active' : 'Apply to Map') + '</button>' +
-                (_alertsSelectedIcaos.size > 0
-                    ? '<button class="rf-cat-btn" style="margin-left:auto" onclick="window._rfClearAlerts()">Clear selection</button>'
-                    : '') +
+                    '<button class="rf-cat-btn' + (_alertsMapFilter ? ' rf-cat-active rf-alerts-mapfilter-btn' : ' rf-alerts-mapfilter-btn') + '" id="rf-al-map-btn">' + (_alertsMapFilter ? 'Filter On' : 'Filter') + '</button>' +
+                    '<button class="rf-cat-btn" id="rf-al-clear-facets">Clear facets</button>' +
+                    (_alertsSelectedIcaos.size > 0 ? '<button class="rf-cat-btn" id="rf-al-clear-selected">Clear selection</button>' : '') +
                 '</div>';
         }
 
-        // Column header -- matches rf-item row layout
-        if (hdrEl) {
-            hdrEl.innerHTML =
-                '<div class="rf-colheader-row rf-al-hdr">' +
-                '<span class="rf-al-hdr-live"></span>' +
-                '<span class="rf-al-hdr-name">Aircraft</span>' +
-                '<span class="rf-al-hdr-type">Type</span>' +
-                '<span class="rf-al-hdr-cat">Category</span>' +
-                '<span class="rf-al-hdr-info"></span>' +
-                '</div>';
+        // Build live plane map for scope-aware filtering (all / inview / filtered)
+        var livePlaneMap = {};
+        if (gReady()) {
+            for (var lpi = 0; lpi < g.planesOrdered.length; lpi++) {
+                var lp = g.planesOrdered[lpi];
+                if (lp.icao) livePlaneMap[lp.icao.toUpperCase()] = lp;
+            }
         }
 
-        // Filter the DB
-        var search = state.searchText.toLowerCase();
-        var filtered = _alertsDb.filter(function(a) {
-            if (_alertsFilters.cmpg     && a.cmpg     !== _alertsFilters.cmpg)                                                             return false;
-            if (_alertsFilters.category && a.category !== _alertsFilters.category)                                                          return false;
-            if (_alertsFilters.tag      && a.tag1 !== _alertsFilters.tag && a.tag2 !== _alertsFilters.tag && a.tag3 !== _alertsFilters.tag) return false;
-            if (_alertsFilters.liveOnly && !liveIcaos.has(a.icao))                                                                          return false;
+        // Main filtered set
+        var search = (state.searchText || '').toLowerCase();
+        function matchesFacet(a) {
+            if (_alertsFilters.cmpg && a.cmpg !== _alertsFilters.cmpg) return false;
+            if (_alertsFilters.category && a.category !== _alertsFilters.category) return false;
+            if (_alertsFilters.tag && a.tag1 !== _alertsFilters.tag && a.tag2 !== _alertsFilters.tag && a.tag3 !== _alertsFilters.tag) return false;
+            var p = livePlaneMap[(a.icao || '').toUpperCase()];
+            if (!p) return false; // alerts tab follows current aircraft scope
+            if (_panelScope === 'inview' && !p.inView) return false;
+            if (_panelScope === 'filtered' && !planePassesAllFilters(p, 'alerts')) return false;
             if (search) {
                 var hay = (a.icao + ' ' + a.reg + ' ' + a.operator + ' ' + a.type + ' ' + a.cmpg + ' ' + a.category + ' ' + a.tag1 + ' ' + a.tag2 + ' ' + a.tag3).toLowerCase();
                 if (!hay.includes(search)) return false;
             }
             return true;
-        });
-
+        }
+        function alertScore(a) {
+            var score = 0;
+            if (liveIcaos.has(a.icao)) score += 70;
+            if (_alertsSelectedIcaos.has(a.icao)) score += 40;
+            if (a.category) score += 8;
+            if (a.cmpg) score += 6;
+            if (a.link) score += 4;
+            if (a.tag1 || a.tag2 || a.tag3) score += 6;
+            return score;
+        }
+        var filtered = _alertsDb.filter(matchesFacet).sort(function(a, b) { return alertScore(b) - alertScore(a); });
         var displayed = filtered.slice(0, 300);
-        var overflow  = filtered.length > 300;
+        var overflow = filtered.length > 300;
 
-        if (!listEl) return;
-
+        var hotNow = displayed.filter(function(a) { return liveIcaos.has(a.icao); }).slice(0, 5);
         var html = '';
-
-        // Detail card pinned at top of the list (doesn't replace list)
-        if (_alertsMoreInfo) {
-            var mi = _alertsDb.find(function(a) { return a.icao === _alertsMoreInfo; });
-            if (mi) {
-                var isLive  = liveIcaos.has(mi.icao);
-                var tags    = [mi.tag1, mi.tag2, mi.tag3].filter(Boolean).join(', ');
-                var psUrl   = 'https://www.planespotters.net/search?q=' + encodeURIComponent(mi.reg || mi.icao);
-                var fr24Url = 'https://www.flightradar24.com/' + encodeURIComponent(mi.reg || mi.icao);
-                var adsbUrl = 'https://globe.adsbexchange.com/?icao=' + mi.icao.toLowerCase();
-                html +=
-                    '<div class="rf-al-detail">' +
-                    '<div class="rf-al-detail-hdr">' +
-                    (isLive ? '<span class="rf-al-live-dot"></span>' : '') +
-                    '<span class="rf-mi-icao">' + esc(mi.icao) + '</span>' +
-                    '<span class="rf-mi-reg">' + esc(mi.reg) + '</span>' +
-                    (isLive ? '<span class="rf-mi-live-badge">On map</span>' : '') +
-                    '<button class="rf-mi-close" onclick="window._rfAlertsMi(null)">&#x2715;</button>' +
-                    '</div>' +
-                    '<div class="rf-al-detail-body">' +
-                    (mi.operator ? '<div class="rf-mi-row"><span class="rf-mi-label">Operator</span><span class="rf-mi-val">' + esc(mi.operator) + '</span></div>' : '') +
-                    (mi.type     ? '<div class="rf-mi-row"><span class="rf-mi-label">Aircraft</span><span class="rf-mi-val">' + esc(mi.type) + (mi.icaoType ? ' (' + esc(mi.icaoType) + ')' : '') + '</span></div>' : '') +
-                    (mi.cmpg     ? '<div class="rf-mi-row"><span class="rf-mi-label">Type</span><span class="rf-mi-val">' + esc(mi.cmpg) + '</span></div>' : '') +
-                    (mi.category ? '<div class="rf-mi-row"><span class="rf-mi-label">Category</span><span class="rf-mi-val">' + esc(mi.category) + '</span></div>' : '') +
-                    (tags        ? '<div class="rf-mi-row"><span class="rf-mi-label">Tags</span><span class="rf-mi-val">' + esc(tags) + '</span></div>' : '') +
-                    '</div>' +
-                    '<div class="rf-mi-links">' +
-                    (mi.link ? '<a class="rf-mi-link" href="' + esc(mi.link) + '" target="_blank" rel="noopener">Reference</a>' : '') +
-                    '<a class="rf-mi-link" href="' + psUrl   + '" target="_blank" rel="noopener">Planespotters</a>' +
-                    '<a class="rf-mi-link" href="' + fr24Url + '" target="_blank" rel="noopener">FR24</a>' +
-                    '<a class="rf-mi-link" href="' + adsbUrl + '" target="_blank" rel="noopener">ADSBx</a>' +
-                    '</div>' +
-                    '<div id="rf-mi-img-wrap" class="rf-mi-img-wrap"><span class="rf-mi-img-loading">Loading photo\u2026</span></div>' +
-                    '</div>';
-                // async photo load
-                (function(icao, wrapId) {
-                    // defer so innerHTML is committed first
-                    setTimeout(function() {
-                        fetch('https://api.planespotters.net/pub/photos/hex/' + icao.toLowerCase())
-                            .then(function(r) { return r.json(); })
-                            .then(function(d) {
-                                var wrap = document.getElementById(wrapId);
-                                if (!wrap) return;
-                                if (d && d.photos && d.photos.length > 0) {
-                                    var ph = d.photos[0];
-                                    wrap.innerHTML = '<a href="' + ph.link + '" target="_blank" rel="noopener">' +
-                                        '<img class="rf-mi-img" src="' + ph.thumbnail_large.src + '" alt="photo"></a>' +
-                                        '<div class="rf-mi-photo-credit">\u00a9 ' + esc(ph.photographer) + ' via Planespotters</div>';
-                                } else {
-                                    wrap.innerHTML = '<div class="rf-mi-img-none">No photo available</div>';
-                                }
-                            })
-                            .catch(function() {
-                                var wrap = document.getElementById(wrapId);
-                                if (wrap) wrap.innerHTML = '<div class="rf-mi-img-none">Photo unavailable</div>';
-                            });
-                    }, 0);
-                })(mi.icao, 'rf-mi-img-wrap');
-            } else {
-                _alertsMoreInfo = null;
-            }
+        if (hotNow.length > 0) {
+            html += '<div class="rf-al-hot-wrap"><div class="rf-al-hot-title">Hot Now</div><div class="rf-al-hot-list">';
+            hotNow.forEach(function(a) {
+                html += '<button class="rf-al-hot-chip" data-rf-action="toggle" data-rf-icao="' + escAttr(a.icao) + '">' +
+                    '<span class="rf-al-hot-icao">' + esc(a.icao) + '</span>' +
+                    (a.reg ? '<span class="rf-al-hot-reg">' + esc(a.reg) + '</span>' : '') +
+                    '</button>';
+            });
+            html += '</div></div>';
         }
 
-        // List rows -- same rf-item pattern as other tabs
         if (displayed.length === 0) {
-            html += '<div class="rf-empty">No matches' + (search ? ' for "' + search + '"' : '') + '</div>';
+            html += '<div class="rf-empty">No matches' + (search ? ' for "' + esc(search) + '"' : '') + '</div>';
         } else {
             displayed.forEach(function(a) {
-                var live    = liveIcaos.has(a.icao);
-                var sel     = _alertsSelectedIcaos.has(a.icao);
-                var classes = 'rf-item rf-al-item' + (sel ? ' rf-item-active' : '') + (live ? ' rf-al-live' : '');
-                html +=
-                    '<div class="' + classes + '" data-icao="' + esc(a.icao) + '" onclick="window._rfToggleAlert(this)">' +
-                    '<span class="rf-al-live-cell">' + (live ? '<span class="rf-al-live-dot"></span>' : '') + '</span>' +
-                    '<span class="rf-item-name rf-al-name">' +
-                        '<span class="rf-al-name-top"><span class="rf-al-icao">' + esc(a.icao) + '</span>' +
-                        (a.reg ? ' <span class="rf-al-reg">' + esc(a.reg) + '</span>' : '') + '</span>' +
-                        (a.operator ? '<span class="rf-al-op-small">' + esc(a.operator) + '</span>' : '') +
-                    '</span>' +
-                    '<span class="rf-al-type-col">' + esc(a.type || a.icaoType || '') + '</span>' +
-                    '<span class="rf-al-cat-col">' + esc(a.category || '') + '</span>' +
-                    '<button class="rf-al-info-btn" onclick="event.stopPropagation();window._rfAlertsMi(\'' + esc(a.icao) + '\')">\u2139</button>' +
-                    '</div>';
+                var live = liveIcaos.has(a.icao);
+                var sel = _alertsSelectedIcaos.has(a.icao);
+                var tags = [a.tag1, a.tag2, a.tag3].filter(Boolean);
+                var classes = 'rf-item rf-al-item rf-al-card' + (sel ? ' rf-item-active' : '') + (live ? ' rf-al-live' : '');
+                html += '<div class="' + classes + '" data-rf-action="toggle" data-rf-icao="' + escAttr(a.icao) + '">' +
+                    '<div class="rf-al-card-head">' +
+                        '<span class="rf-al-live-cell">' + (live ? '<span class="rf-al-live-dot"></span>' : '') + '</span>' +
+                        '<span class="rf-al-name-top"><span class="rf-al-icao">' + esc(a.icao) + '</span>' + (a.reg ? ' <span class="rf-al-reg">' + esc(a.reg) + '</span>' : '') + '</span>' +
+                        '<span class="rf-al-type-col">' + esc(a.type || a.icaoType || '') + '</span>' +
+                        '<button class="rf-al-info-btn" data-rf-action="info" data-rf-icao="' + escAttr(a.icao) + '">\u2139</button>' +
+                    '</div>' +
+                    '<div class="rf-al-card-sub">' + (a.operator ? '<span class="rf-al-op-small">' + esc(a.operator) + '</span>' : '<span class="rf-al-op-small rf-muted">Unknown operator</span>') + '</div>' +
+                    '<div class="rf-al-card-tags">' +
+                        (a.cmpg ? '<button class="rf-al-pill rf-al-pill-cmpg" data-rf-action="facet" data-rf-field="cmpg" data-rf-value="' + escAttr(a.cmpg) + '">' + esc(a.cmpg) + '</button>' : '') +
+                        (a.category ? '<button class="rf-al-pill rf-al-pill-cat" data-rf-action="facet" data-rf-field="category" data-rf-value="' + escAttr(a.category) + '">' + esc(a.category) + '</button>' : '') +
+                        tags.map(function(t) { return '<button class="rf-al-pill rf-al-pill-tag" data-rf-action="facet" data-rf-field="tag" data-rf-value="' + escAttr(t) + '">' + esc(t) + '</button>'; }).join('') +
+                        (a.link ? '<a class="rf-al-pill rf-al-pill-link" href="' + escAttr(a.link) + '" target="_blank" rel="noopener">Intel</a>' : '') +
+                    '</div>' +
+                '</div>';
             });
-            if (overflow) html += '<div class="rf-empty" style="font-size:10px;padding:8px">Showing 300 of ' + filtered.length + ' \u2014 refine search</div>';
+            if (overflow) html += '<div class="rf-empty" style="font-size:10px;padding:8px">Showing 300 of ' + filtered.length + ' — refine search</div>';
+        }
+        listEl.innerHTML = html;
+
+        // Controls events
+        if (ctrlEl) {
+            var cmpgEl = document.getElementById('rf-al-cmpg');
+            var catEl = document.getElementById('rf-al-cat');
+            var tagEl = document.getElementById('rf-al-tag');
+            var mapBtn = document.getElementById('rf-al-map-btn');
+            var clearFacetsBtn = document.getElementById('rf-al-clear-facets');
+            var clearSelBtn = document.getElementById('rf-al-clear-selected');
+            if (cmpgEl) cmpgEl.onchange = window._rfAlertsFilter;
+            if (catEl) catEl.onchange = window._rfAlertsFilter;
+            if (tagEl) tagEl.onchange = window._rfAlertsFilter;
+            if (mapBtn) mapBtn.onclick = function() { window._rfToggleAlertsMap(!_alertsMapFilter); };
+            if (clearFacetsBtn) clearFacetsBtn.onclick = function() {
+                _alertsFilters.cmpg = ''; _alertsFilters.category = ''; _alertsFilters.tag = '';
+                buildPanel();
+            };
+            if (clearSelBtn) clearSelBtn.onclick = window._rfClearAlerts;
         }
 
-        listEl.innerHTML = html;
+        // Delegated list click handling
+        listEl.onclick = function(ev) {
+            var t = ev.target;
+            if (!t) return;
+            if (t.closest('a.rf-al-pill-link')) return; // allow normal link navigation
+            var n = t.closest('[data-rf-action]');
+            if (!n) return;
+            var action = n.getAttribute('data-rf-action');
+            if (action === 'toggle') {
+                window._rfToggleAlert((n.getAttribute('data-rf-icao') || '').toUpperCase());
+            } else if (action === 'facet') {
+                window._rfAlertsQuick(n.getAttribute('data-rf-field') || '', n.getAttribute('data-rf-value') || '');
+            } else if (action === 'info') {
+                window._rfAlertsMi((n.getAttribute('data-rf-icao') || '').toUpperCase());
+            }
+            ev.preventDefault();
+            ev.stopPropagation();
+        };
 
         if (statusEl) {
             var liveCount = filtered.filter(function(a) { return liveIcaos.has(a.icao); }).length;
-            var selCount  = _alertsSelectedIcaos.size;
+            var selCount = _alertsSelectedIcaos.size;
             statusEl.textContent = filtered.length + ' entries' +
-                (liveCount > 0 ? ' \u2022 ' + liveCount + ' live' : '') +
-                (selCount  > 0 ? ' \u2022 ' + selCount  + ' selected' : '');
+                (liveCount > 0 ? ' • ' + liveCount + ' live' : '') +
+                (selCount > 0 ? ' • ' + selCount + ' selected' : '');
         }
     }
 
@@ -1419,23 +1763,24 @@
 
         // ── Scope toggle in the controls bar ──────────────────────────────────
         var ctrlEl = document.getElementById('rf-controls');
-        if (ctrlEl) {
-            ctrlEl.innerHTML =
-                '<div class="rf-sum-scope-wrap">' +
-                '<button class="rf-sum-scope-btn' + (!_summaryInView ? ' rf-sum-scope-active' : '') + '" ' +
-                    'onclick="window._rfSumToggleScope(false)" title="Include all aircraft currently being received">All aircraft</button>' +
-                '<button class="rf-sum-scope-btn' + (_summaryInView ? ' rf-sum-scope-active' : '') + '" ' +
-                    'onclick="window._rfSumToggleScope(true)" title="Only aircraft visible in the current map viewport">In map view</button>' +
-                '</div>';
-        }
+        if (ctrlEl) ctrlEl.innerHTML = '';
 
         var listEl = document.getElementById('rf-list');
         if (!listEl) return;
+
+        // Reset per-render click-data lookup (avoids stale indices across refreshes)
+        _sumClickData = [];
 
         if (!gReady()) {
             listEl.innerHTML = '<div class="rf-empty">Waiting for aircraft data\u2026</div>';
             return;
         }
+
+        // Ensure plane-alert-db is loaded even if the user never opens the Alerts tab.
+        // (Summary "Attention" can show alert-matched aircraft.)
+        try {
+            if (_summarySettings.attention && !_alertsDb && !_alertsFetching) loadAlerts(false);
+        } catch(e) {}
 
         // All planes are used for arrivals tracking (so moving in/out of view doesn't
         // reset first-seen times). Statistics use the scope-filtered set.
@@ -1450,10 +1795,12 @@
         }
         Object.keys(_sumArrivals).forEach(function(ic) { if (!currentIcaos[ic]) delete _sumArrivals[ic]; });
 
-        // Apply scope filter
-        var planes = _summaryInView
-            ? allPlanes.filter(function(p) { return p.inView; })
-            : allPlanes;
+        // Apply runtime scope filter (shared with all tabs)
+        var planes = allPlanes.filter(function(p) {
+            if (_panelScope === 'inview') return !!p.inView;
+            if (_panelScope === 'filtered') return planePassesAllFilters(p, null);
+            return true;
+        });
 
         var total   = planes.length;
         var altBands     = [0, 0, 0, 0, 0, 0, 0]; // ground, <5k, 5-10k, 10-20k, 20-30k, 30-40k, 40k+
@@ -1461,6 +1808,10 @@
         var militaryList  = [];
         var emergencyList = [];
         var unusualList   = [];
+        var onGroundIcaos = [];
+        var trackingIcaos = [];
+        var withRouteIcaos = [];
+        var noRouteIcaos = [];
         var operatorCounts = {};
         var routeCounts    = {};
         var typeCounts     = {};
@@ -1503,6 +1854,7 @@
                 altBands[bi2]++;
                 if (p.icao) altBandIcaos[bi2].push(p.icao.toUpperCase());
             }
+            if (isGround && p.icao) onGroundIcaos.push(p.icao.toUpperCase());
 
             // Military
             if (isMilitaryAircraft(p)) militaryList.push(p);
@@ -1528,6 +1880,15 @@
 
             // Route counts
             var route = parseRoute(p);
+            var hasRoute = !!(route && route.fromIcao && route.toIcao);
+            if (!hasRoute) {
+                var rs = ((p.routeString || '') + '').trim();
+                hasRoute = rs.length > 0 && rs.indexOf(' - ') > 0;
+            }
+            if (p.icao) {
+                if (hasRoute) withRouteIcaos.push(p.icao.toUpperCase());
+                else noRouteIcaos.push(p.icao.toUpperCase());
+            }
             if (route && route.fromIcao && route.toIcao) {
                 var rk = route.fromIcao + ' \u2013 ' + route.toIcao;
                 routeCounts[rk] = (routeCounts[rk] || 0) + 1;
@@ -1552,6 +1913,11 @@
             else if (at.indexOf('tisb') === 0)                          methodCounts.tisb++;
             else if (at === 'mode_s')                                   methodCounts.modes++;
             else                                                        methodCounts.other++;
+            // Tracking = aircraft with a known tracking method and a live position.
+            if (at && p.icao) {
+                var hasPos = (p.position && p.position.length >= 2) || (!isNaN(+p.lat) && !isNaN(+p.lon));
+                if (hasPos) trackingIcaos.push(p.icao.toUpperCase());
+            }
 
             // Countries (registration prefix → ICAO hex fallback)
             var ctry = _rfRegCountry(p.registration, p.icao);
@@ -1590,6 +1956,19 @@
             return bA - aA;
         });
         highList = highList.slice(0, 5);
+
+        // Alert DB matches — planes currently on scope that appear in _alertsDb
+        var alertsList = [];
+        if (_alertsDb && _alertsDb.length) {
+            var _aLiveMap = {};
+            for (var ali = 0; ali < planes.length; ali++) {
+                if (planes[ali].icao) _aLiveMap[planes[ali].icao.toUpperCase()] = planes[ali];
+            }
+            _alertsDb.forEach(function(a) {
+                var lp = _aLiveMap[(a.icao || '').toUpperCase()];
+                if (lp) alertsList.push({ plane: lp, alert: a });
+            });
+        }
 
         var topOps    = Object.keys(operatorCounts).map(function(k){ return [k, operatorCounts[k]]; })
                                .sort(function(a,b){ return b[1]-a[1]; }).slice(0, 6);
@@ -1652,15 +2031,35 @@
         // ── Overview (always shown) ───────────────────────────────────────────────
         var onGround = altBands[0];
         var airborne = total - onGround;
+        var milIdx   = militaryList.length > 0 ? (_sumClickData.push(militaryList.map(function(q){ return q.icao; })) - 1) : -1;
+        var gndIdx   = onGroundIcaos.length > 0 ? (_sumClickData.push(onGroundIcaos.slice()) - 1) : -1;
+        var trkIdx   = trackingIcaos.length > 0 ? (_sumClickData.push(trackingIcaos.slice()) - 1) : -1;
+        var wrIdx    = withRouteIcaos.length > 0 ? (_sumClickData.push(withRouteIcaos.slice()) - 1) : -1;
+        var nrIdx    = noRouteIcaos.length > 0 ? (_sumClickData.push(noRouteIcaos.slice()) - 1) : -1;
+        var alrtIdx  = alertsList.length > 0 ? (_sumClickData.push(alertsList.map(function(x){ return x.plane.icao; })) - 1) : -1;
         html += '<div class="rf-sum-section">';
-        html += '<div class="rf-sum-title">Overview' +
-            (_summaryInView ? ' <span class="rf-sum-scope-badge">in view</span>' : '') + '</div>';
+        html += '<div class="rf-sum-title">Overview <span class="rf-sum-scope-badge">' + _rfScopeBadgeLabel() + '</span></div>';
         html += '<div class="rf-sum-overview">';
-        html += '<div class="rf-sum-stat"><div class="rf-sum-num">' + total + '</div><div class="rf-sum-label">total aircraft</div></div>';
+        html += '<div class="rf-sum-stat"><div class="rf-sum-num">' + total + '</div><div class="rf-sum-label">loaded aircraft</div></div>';
         html += '<div class="rf-sum-stat"><div class="rf-sum-num">' + airborne + '</div><div class="rf-sum-label">airborne</div></div>';
-        html += '<div class="rf-sum-stat"><div class="rf-sum-num">' + onGround + '</div><div class="rf-sum-label">on ground</div></div>';
+        html += '<div class="rf-sum-stat' + (onGroundIcaos.length > 0 ? ' rf-sum-stat-click' : '') + '"' +
+            (onGroundIcaos.length > 0 ? ' onclick="window._rfSumFilterIdx(' + gndIdx + ')" title="Filter on-ground aircraft"' : '') + '>' +
+            '<div class="rf-sum-num">' + onGround + '</div><div class="rf-sum-label">on ground</div></div>';
+        html += '<div class="rf-sum-stat' + (trackingIcaos.length > 0 ? ' rf-sum-stat-click' : '') + '"' +
+            (trackingIcaos.length > 0 ? ' onclick="window._rfSumFilterIdx(' + trkIdx + ')" title="Filter tracked aircraft"' : '') + '>' +
+            '<div class="rf-sum-num">' + trackingIcaos.length + '</div><div class="rf-sum-label">tracking</div></div>';
+        html += '<div class="rf-sum-stat' + (withRouteIcaos.length > 0 ? ' rf-sum-stat-click' : '') + '"' +
+            (withRouteIcaos.length > 0 ? ' onclick="window._rfSumFilterIdx(' + wrIdx + ')" title="Filter aircraft with route data"' : '') + '>' +
+            '<div class="rf-sum-num">' + withRouteIcaos.length + '</div><div class="rf-sum-label">with route</div></div>';
+        html += '<div class="rf-sum-stat' + (noRouteIcaos.length > 0 ? ' rf-sum-stat-click' : '') + '"' +
+            (noRouteIcaos.length > 0 ? ' onclick="window._rfSumFilterIdx(' + nrIdx + ')" title="Filter aircraft without route data"' : '') + '>' +
+            '<div class="rf-sum-num">' + noRouteIcaos.length + '</div><div class="rf-sum-label">no route</div></div>';
+        html += '<div class="rf-sum-stat' + (alertsList.length > 0 ? ' rf-sum-stat-click' : '') + '"' +
+            (alertsList.length > 0 ? ' onclick="window._rfSumFilterIdx(' + alrtIdx + ')" title="Filter alert-matched aircraft"' : '') + '>' +
+            '<div class="rf-sum-num">' + alertsList.length + '</div><div class="rf-sum-label">alert</div></div>';
         if (militaryList.length > 0) {
-            html += '<div class="rf-sum-stat rf-sum-stat-mil"><div class="rf-sum-num">' + militaryList.length + '</div><div class="rf-sum-label">military</div></div>';
+            html += '<div class="rf-sum-stat rf-sum-stat-mil rf-sum-stat-click" onclick="window._rfSumFilterIdx(' + milIdx + ')" title="Filter military aircraft">' +
+                '<div class="rf-sum-num">' + militaryList.length + '</div><div class="rf-sum-label">military</div></div>';
         }
         if (emergencyList.length > 0) {
             html += '<div class="rf-sum-stat rf-sum-stat-emg"><div class="rf-sum-num">' + emergencyList.length + '</div><div class="rf-sum-label">emergency</div></div>';
@@ -1685,9 +2084,9 @@
                 var bandIcaos  = altBandIcaos[bi];
                 var bandActive = cnt > 0 && _sumFilter.size > 0 && bandIcaos.length > 0 &&
                     bandIcaos.every(function(ic){ return _sumFilter.has(ic); });
-                var bandJson   = cnt > 0 ? JSON.stringify(bandIcaos) : '[]';
+                var bandIdx    = cnt > 0 ? (_sumClickData.push(bandIcaos.slice()) - 1) : -1;
                 html += '<div class="rf-sum-altrow' + (bandActive ? ' rf-sum-altrow-active' : '') + (cnt > 0 ? ' rf-sum-altrow-clickable' : '') + '" ' +
-                    (cnt > 0 ? 'onclick="window._rfSumFilterSet(' + bandJson + ')" ' : '') +
+                    (cnt > 0 ? 'onclick="window._rfSumFilterIdx(' + bandIdx + ')" ' : '') +
                     'title="' + altFullLbls[bi] + ': ' + cnt + ' aircraft (' + realPct + '%)' + (cnt > 0 ? ' — click to filter' : '') + '">' +
                     '<div class="rf-sum-altrow-lbl" style="color:' + altColors[bi] + '">' + altLabels[bi] + '</div>' +
                     '<div class="rf-sum-altrow-track">' +
@@ -1707,7 +2106,7 @@
 
         // ── Attention required ────────────────────────────────────────────────────
         if (_summarySettings.attention) {
-            var hasAttn = emergencyList.length > 0 || unusualList.length > 0 || militaryList.length > 0;
+            var hasAttn = emergencyList.length > 0 || unusualList.length > 0 || militaryList.length > 0 || _alertsDb || _alertsFetching || _alertsError;
             html += '<div class="rf-sum-section">';
             html += '<div class="rf-sum-title">Attention</div>';
             if (!hasAttn) {
@@ -1715,8 +2114,8 @@
             } else {
                 // Emergency squawks — clickable header filters all emergency planes
                 if (emergencyList.length > 0) {
-                    var emgIcaos = JSON.stringify(emergencyList.map(function(q){ return q.icao; }));
-                    html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterSet(' + emgIcaos + ')" title="Click to filter all emergency aircraft">' +
+                    var emgIdx = _sumClickData.push(emergencyList.map(function(q){ return q.icao; })) - 1;
+                    html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterIdx(' + emgIdx + ')" title="Click to filter all emergency aircraft">' +
                         '<span class="rf-sum-squawk-hdr">&#9888; Emergency (' + emergencyList.length + ')</span>' +
                         '</div>';
                     emergencyList.forEach(function (q) {
@@ -1727,26 +2126,51 @@
                 }
                 // Military — clickable header filters all military planes
                 if (militaryList.length > 0) {
-                    var milIcaos = JSON.stringify(militaryList.map(function(q){ return q.icao; }));
-                    html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterSet(' + milIcaos + ')" title="Click to filter all military aircraft">' +
+                    var milIdx = _sumClickData.push(militaryList.map(function(q){ return q.icao; })) - 1;
+                    html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterIdx(' + milIdx + ')" title="Click to filter all military aircraft">' +
                         '<span class="rf-sum-mil-badge">MIL (' + militaryList.length + ')</span>' +
                         '</div>';
                     militaryList.slice(0, 8).forEach(function (q) {
                         html += planeRow(q, '<span class="rf-sum-mil-badge">MIL</span>');
                     });
                     if (militaryList.length > 8) {
-                        html += '<div class="rf-sum-more">and ' + (militaryList.length - 8) + ' more \u2014 <span class="rf-sum-link" onclick="window._rfSumFilterSet(' + milIcaos + ')">filter all</span></div>';
+                        html += '<div class="rf-sum-more">and ' + (militaryList.length - 8) + ' more \u2014 <span class="rf-sum-link" onclick="window._rfSumFilterIdx(' + milIdx + ')">filter all</span></div>';
                     }
                 }
                 // Very low aircraft
                 if (unusualList.length > 0) {
-                    var lowIcaos = JSON.stringify(unusualList.map(function(i){ return i.plane.icao; }));
-                    html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterSet(' + lowIcaos + ')" title="Click to filter all low-altitude aircraft">' +
+                    var lowIdx = _sumClickData.push(unusualList.map(function(i){ return i.plane.icao; })) - 1;
+                    html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterIdx(' + lowIdx + ')" title="Click to filter all low-altitude aircraft">' +
                         '<span class="rf-sum-low-badge">LOW (' + unusualList.length + ')</span>' +
                         '</div>';
                     unusualList.slice(0, 4).forEach(function (item) {
                         html += planeRow(item.plane, '<span class="rf-sum-low-badge">LOW</span> <span class="rf-sum-attn-desc">' + esc(item.reason) + '</span>');
                     });
+                }
+                // Plane alert DB status/matches (always shown so visibility is obvious)
+                if (_alertsFetching) {
+                    html += '<div class="rf-sum-attn-hdr"><span class="rf-sum-alert-badge">\u2605 Alerts (loading\u2026)</span></div>';
+                } else if (_alertsError) {
+                    html += '<div class="rf-sum-attn-hdr"><span class="rf-sum-alert-badge">\u2605 Alerts (error)</span></div>';
+                    html += '<div class="rf-sum-none">plane-alert-db failed to load: ' + esc(_alertsError) + '</div>';
+                } else if (_alertsDb) {
+                    if (alertsList.length > 0) {
+                        var alIdx = _sumClickData.push(alertsList.map(function(x){ return x.plane.icao; })) - 1;
+                        html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterIdx(' + alIdx + ')" title="Click to filter all alert-matched aircraft">' +
+                            '<span class="rf-sum-alert-badge">\u2605 Alerts (' + alertsList.length + ')</span>' +
+                            '</div>';
+                        alertsList.slice(0, 6).forEach(function(item) {
+                            var tags = [item.alert.tag1, item.alert.tag2, item.alert.tag3].filter(Boolean).join(' \u00b7 ');
+                            var label = tags || item.alert.category || item.alert.cmpg || 'Alert';
+                            html += planeRow(item.plane, '<span class="rf-sum-alert-tag">' + esc(label) + '</span>');
+                        });
+                        if (alertsList.length > 6) {
+                            html += '<div class="rf-sum-more">and ' + (alertsList.length - 6) + ' more \u2014 <span class="rf-sum-link" onclick="window._rfSumFilterIdx(' + alIdx + ')">filter all</span></div>';
+                        }
+                    } else {
+                        html += '<div class="rf-sum-attn-hdr"><span class="rf-sum-alert-badge">\u2605 Alerts (0)</span></div>';
+                        html += '<div class="rf-sum-none">No alert-matched aircraft in the current summary scope.</div>';
+                    }
                 }
             }
             html += '</div>';
@@ -1987,7 +2411,7 @@
         listEl.innerHTML = html;
 
         var statusEl = document.getElementById('rf-status');
-        if (statusEl) statusEl.textContent = total + ' aircraft' + (_summaryInView ? ' in view' : '');
+        if (statusEl) statusEl.textContent = total + ' aircraft' + (_panelScope !== 'all' ? ' (' + _rfScopeLabel() + ')' : '');
         var btn = document.getElementById('rf-btn');
         if (btn) btn.className = 'button ' + (isFilterActive() ? 'activeButton' : 'inActiveButton');
     }
@@ -2003,47 +2427,77 @@
         if (hdrEl) hdrEl.innerHTML = '';
         var listEl = document.getElementById('rf-list');
         if (listEl) {
+            var hc = _rfGetHomeConfig();
+            var detTxt = hc.detected
+                ? (hc.detected.lat.toFixed(5) + ', ' + hc.detected.lon.toFixed(5) + ' (' + hc.source + ')')
+                : 'Not detected from tar1090 globals';
+            var storageWarnBackup = (_rfLocalStorageOk === false)
+                ? '<div class="rf-set-about-warn" style="margin-top:8px">' +
+                  '<strong>Storage warning</strong> — localStorage is blocked in this browser session. ' +
+                  'RF is running in cookie-only fallback mode. Use Export JSON for reliable backups.' +
+                  '</div>'
+                : '';
+            var homeLocOpts = '<option value="">Select saved distance location…</option>';
+            for (var hli = 0; hli < _distanceLocations.length; hli++) {
+                var hl = _distanceLocations[hli];
+                var nm = String(hl && hl.name ? hl.name : ('Location ' + (hli + 1)));
+                nm = nm.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+                homeLocOpts += '<option value="' + hli + '">' + nm + '</option>';
+            }
             listEl.innerHTML =
                 '<div class="rf-settings-content">' +
 
                 // ── Intro ─────────────────────────────────────────────────────
                 '<div class="rf-set-intro">' +
-                '<p>tar1090 is a web-based aircraft tracking interface that decodes ADS-B transponder signals and plots them on a live map. ' +
-                'This version adds <strong>Robs Filters</strong> on top: a panel that lets you narrow down what is shown on the map by airport, country, operator, aircraft type, or distance. ' +
-                'The <strong><a class="rf-set-link" onclick="window._rfSwitchTab(\'summary\')">Summary tab</a></strong> interprets the live data \u2014 aircraft counts, altitude bands, military contacts, emergency squawks, and busiest routes \u2014 rather than just displaying it.' +
+                '<p><strong>Robs Filters</strong> adds quick filtering and map-focused insights to tar1090.' +
+                'The <strong><a class="rf-set-link" onclick="window._rfSwitchTab(\'summary\')">Summary tab</a></strong> gives a live overview of traffic mix, altitude bands, hotspots, and notable aircraft.' +
                 '</p>' +
-                '<p style="margin:0">This panel is still beta. Things may break. Filters work by patching tar1090\'s internal <code>isFiltered</code> function and are re-evaluated on every data refresh.</p>' +
-                '</div>' +
-
-                '<div class="rf-set-divider"></div>' +
-
-                // ── Filter behaviour ──────────────────────────────────────────
-                '<div class="rf-set-group">' +
-                '<div class="rf-set-group-title">Filter Behaviour</div>' +
-                '<label class="rf-set-toggle">' +
-                '<input type="checkbox" id="rf-inview-toggle"' + (settings.inView ? ' checked' : '') + ' onchange="window._rfSetInView(this.checked)">' +
-                '<div class="rf-set-toggle-body">' +
-                '<div class="rf-set-toggle-label">Only show aircraft in map view</div>' +
-                '<div class="rf-set-toggle-desc">When on, filter lists and the map filter only consider aircraft currently visible in the viewport.</div>' +
-                '</div>' +
-                '</label>' +
-                '<label class="rf-set-toggle" style="margin-top:6px">' +
-                '<input type="checkbox"' + (_summarySettings.defaultInView ? ' checked' : '') + ' onchange="window._rfSetSumDefaultInView(this.checked)">' +
-                '<div class="rf-set-toggle-body">' +
-                '<div class="rf-set-toggle-label">Summary tab: default to in map view</div>' +
-                '<div class="rf-set-toggle-desc">When on, the Summary tab opens showing only aircraft in the current map viewport. You can always switch on the fly using the toggle at the top of the Summary tab.</div>' +
-                '</div>' +
-                '</label>' +
+                '<p style="margin:0">Tip: use <strong>In map view</strong> for day-to-day tracking, then switch to <strong>Filtered view</strong> when you want to focus on a specific subset.</p>' +
                 '</div>' +
 
                 '<div class="rf-set-divider"></div>' +
 
                 // ── Panel layout ──────────────────────────────────────────────
                 '<div class="rf-set-group">' +
-                '<div class="rf-set-group-title">Panel Layout</div>' +
+                '<div class="rf-set-group-title">Display & Scope</div>' +
                 '<div class="rf-set-radio-group">' +
                 '<label class="rf-set-radio"><input type="radio" name="rf-display-mode" value="popup"' + (settings.displayMode !== 'sidebar' ? ' checked' : '') + ' onchange="window._rfSetDisplayMode(\'popup\')"><span>Popup</span><span class="rf-set-radio-desc">Floats over the map, draggable</span></label>' +
                 '<label class="rf-set-radio"><input type="radio" name="rf-display-mode" value="sidebar"' + (settings.displayMode === 'sidebar' ? ' checked' : '') + ' onchange="window._rfSetDisplayMode(\'sidebar\')"><span>Sidebar</span><span class="rf-set-radio-desc">Docks alongside tar1090\'s info panel</span></label>' +
+                '</div>' +
+                '<label class="rf-set-toggle" style="margin-top:8px">' +
+                '<input type="checkbox"' + (settings.hideAllScope ? ' checked' : '') + ' onchange="window._rfSetHideAllScope(this.checked)">' +
+                '<div class="rf-set-toggle-body">' +
+                '<div class="rf-set-toggle-label">Hide "All aircraft" scope button</div>' +
+                '<div class="rf-set-toggle-desc">Recommended when tar1090 runs in API/globe mode, where the browser only has map-loaded chunks and "All" can be misleading. ' +
+                'For full global all-aircraft behavior, disable API mode in docker (set READSB_ENABLE_API=false and remove --tar1090-use-api).</div>' +
+                '</div>' +
+                '</label>' +
+                '<div class="rf-set-divider"></div>' +
+                '<div class="rf-set-group-title">Home Position</div>' +
+                '<div class="rf-set-group-desc">Detected: ' + detTxt + '</div>' +
+                '<label class="rf-set-toggle" style="margin-top:6px">' +
+                '<input type="checkbox"' + (settings.homeOverride ? ' checked' : '') + ' onchange="window._rfSetHomeOverride(this.checked)">' +
+                '<div class="rf-set-toggle-body">' +
+                '<div class="rf-set-toggle-label">Override home position</div>' +
+                '<div class="rf-set-toggle-desc">Use custom home center and zoom for the home button and first panel open.</div>' +
+                '</div>' +
+                '</label>' +
+                '<div class="rf-dist-row" style="margin-top:6px">' +
+                '<label class="rf-dist-label">Lat</label>' +
+                '<input class="rf-dist-input rf-dist-small" type="number" step="0.00001" min="-90" max="90" value="' + String(settings.homeLat).replace(/"/g,'&quot;') + '" oninput="window._rfSetHomeValue(\'lat\',this.value)">' +
+                '<label class="rf-dist-label">Lon</label>' +
+                '<input class="rf-dist-input rf-dist-small" type="number" step="0.00001" min="-180" max="180" value="' + String(settings.homeLon).replace(/"/g,'&quot;') + '" oninput="window._rfSetHomeValue(\'lon\',this.value)">' +
+                '<button class="rf-cat-btn" onclick="window._rfUseDetectedHome()" title="Use auto-detected tar1090 home position">Use detected</button>' +
+                '</div>' +
+                '<div class="rf-dist-row" style="margin-top:6px;flex-wrap:wrap">' +
+                '<button class="rf-cat-btn" onclick="window._rfPickHomeFromMap()" title="Click once on the main map to set home position">Pick from map</button>' +
+                '<select id="rf-home-dist-loc" class="rf-dist-input" style="min-width:170px">' + homeLocOpts + '</select>' +
+                '<button class="rf-cat-btn" onclick="window._rfUseDistLocForHome()">Use saved location</button>' +
+                '</div>' +
+                '<div class="rf-dist-row" style="margin-top:6px">' +
+                '<label class="rf-dist-label">Zoom</label>' +
+                '<input class="rf-dist-input rf-dist-small" type="number" step="1" min="2" max="19" value="' + String(settings.homeZoom).replace(/"/g,'&quot;') + '" oninput="window._rfSetHomeValue(\'zoom\',this.value)">' +
+                '<button class="rf-cat-btn" onclick="window._rfCenterHome(true)" title="Center map on configured home">\u2302 Center</button>' +
                 '</div>' +
                 '</div>' +
 
@@ -2058,6 +2512,13 @@
                 '<div class="rf-set-toggle-label">Use local databases</div>' +
                 '<div class="rf-set-toggle-desc">Downloads airports, airlines and routes from community databases once per 24h. ' +
                 'Sources: OurAirports, VRS Standing Data. Reduces live API calls and enriches filter data.</div>' +
+                '</div>' +
+                '</label>' +
+                '<label class="rf-set-toggle">' +
+                '<input type="checkbox"' + (settings.routeKnownOnly ? ' checked' : '') + ' onchange="window._rfSetRouteKnownOnly(this.checked)">' +
+                '<div class="rf-set-toggle-body">' +
+                '<div class="rf-set-toggle-label">Route lookups for known airline prefixes only</div>' +
+                '<div class="rf-set-toggle-desc">Reduces 404 route CSV requests by skipping callsign prefixes that are not in the airline database (common for GA, military, and special flights). Disable this only if you want aggressive lookup attempts.</div>' +
                 '</div>' +
                 '</label>' +
                 dbStatusHtml() +
@@ -2107,6 +2568,7 @@
                     ['countries', 'Countries', 'Filter by origin/destination country'],
                     ['operators', 'Operators', 'Filter by airline or operator'],
                     ['aircraft',  'Aircraft',  'Filter by type or category'],
+                    ['views',     'Views',     'Saved filter presets and quick recall'],
                     ['alerts',    'Alerts',    'Plane alert database matches'],
                     ['distance',  'Distance',  'Filter by distance from a point'],
                 ].map(function (t) {
@@ -2129,22 +2591,41 @@
 
                 '<div class="rf-set-divider"></div>' +
 
+                // ── Backup / Restore ──────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Backup & Restore</div>' +
+                '<div class="rf-set-group-desc">Export your RF config (home, distance, tabs, summary) to a JSON file and re-import it later.</div>' +
+                '<div class="rf-set-group-desc" style="margin-top:6px">Storage mode: localStorage ' + (_rfLocalStorageOk ? 'available' : 'blocked') +
+                ' | cookies ' + (_rfCookieOk ? 'available' : 'blocked') + '. ' +
+                'Cookie backup keys: home=' + (_rfCookieGet(HOME_COOKIE_KEY) ? 'present' : 'missing') +
+                ', snapshot=' + (_rfCookieGet(PERSIST_COOKIE_KEY) ? 'present' : 'missing') + '.</div>' +
+                storageWarnBackup +
+                '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">' +
+                '<button class="rf-cat-btn" onclick="window._rfExportPersist()">Export JSON</button>' +
+                '<button class="rf-cat-btn" onclick="window._rfImportPersistPick()">Import JSON</button>' +
+                '<button class="rf-cat-btn" onclick="window._rfResetPersist()">Reset Saved Data</button>' +
+                '</div>' +
+                '<input id="rf-import-json" type="file" accept="application/json,.json" style="display:none" onchange="window._rfImportPersistFile(this)">' +
+                '</div>' +
+
+                '<div class="rf-set-divider"></div>' +
+
                 // ── About ─────────────────────────────────────────────────────
                 '<div class="rf-set-group">' +
                 '<div class="rf-set-group-title">About <span class="rf-beta-badge">BETA</span></div>' +
                 '<div class="rf-set-about-warn">' +
-                '<strong>Work in progress</strong> \u2014 use at your own risk.<br>' +
-                'Known issues: alerts tab filtering has bugs; distance zone saving is rough; cross-tab state can desync after rapid switching.' +
+                '<strong>Robs Filters is actively developed and still in beta.</strong><br>' +
+                'Feedback and bug reports are welcome.' +
                 '</div>' +
                 '<div style="font-size:11px;color:#aaa;line-height:1.7;margin-top:8px">' +
-                'Filters are <strong>AND-ed across tabs</strong> and <strong>OR-ed within a tab</strong>. ' +
-                'Active filters appear as chips in the breadcrumb bar above the tabs.' +
+                'Filter logic: selections are <strong>AND-ed across tabs</strong> and <strong>OR-ed within each tab</strong>. ' +
+                'Active filters appear as breadcrumb chips so you can quickly see why aircraft are included or excluded.' +
                 '</div>' +
                 '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' +
                 '<a href="https://github.com/robertcanavan/tar1090-robs-filters" target="_blank" class="rf-set-link-btn">&#128279; GitHub</a>' +
                 '<a href="https://github.com/robertcanavan/tar1090-robs-filters/issues" target="_blank" class="rf-set-link-btn">&#x26a0; Report Issue</a>' +
                 '</div>' +
-                '<div class="rf-about-made">Made by Rob \u2014 solving problems that are entirely his own fault, one tab at a time.</div>' +
+                '<div class="rf-about-made">Made by Rob.</div>' +
                 '</div>' +
 
                 '</div>';
@@ -2183,6 +2664,7 @@
             if (_distanceZones.length > 0) {
                 var ZONE_COLORS_UI = ['#00c8e6','#f0e040','#e040fb','#69f080','#ff9800','#ff4444'];
                 zonesHtml += '<div class="rf-setting-section-title" style="margin:4px 0">Active Zones (' + _distanceZones.length + ')</div>';
+                zonesHtml += '<div class="rf-dist-mode-note">Mode: ' + (_distanceMode === 'outside' ? 'Outside zones (exclude inside)' : (_distanceMode === 'maponly' ? 'Map only (no filtering)' : 'Inside zones')) + '</div>';
                 zonesHtml += '<div class="rf-dist-active-zone-list">';
                 _distanceZones.forEach(function(z, i) {
                     var c = ZONE_COLORS_UI[i % ZONE_COLORS_UI.length];
@@ -2266,6 +2748,12 @@
                 '<span class="rf-dist-unit">NM</span>' +
                 '</div>' +
 
+                '<div class="rf-dist-mode-wrap">' +
+                '<button class="rf-sum-scope-btn' + (_distanceMode === 'inside' ? ' rf-sum-scope-active' : '') + '" onclick="window._rfSetDistMode(\'inside\')" title="Filter to aircraft inside active zone(s)">Inside</button>' +
+                '<button class="rf-sum-scope-btn' + (_distanceMode === 'outside' ? ' rf-sum-scope-active' : '') + '" onclick="window._rfSetDistMode(\'outside\')" title="Filter to aircraft outside active zone(s)">Outside</button>' +
+                '<button class="rf-sum-scope-btn' + (_distanceMode === 'maponly' ? ' rf-sum-scope-active' : '') + '" onclick="window._rfSetDistMode(\'maponly\')" title="Do not filter aircraft; only draw active zone(s) on map">Map only</button>' +
+                '</div>' +
+
                 '<div class="rf-dist-row" style="margin-top:4px;gap:6px">' +
                 '<button class="rf-cat-btn rf-cat-active" onclick="window._rfDistApply()" title="Add this zone to the active filter">+ Add Zone</button>' +
                 ((_distanceForm.lat && _distanceForm.lon)
@@ -2317,7 +2805,9 @@
                 for (var di = 0; di < g.planesOrdered.length; di++) {
                     if (planePassesDistanceFilter(g.planesOrdered[di])) cnt++;
                 }
-                statusEl.textContent = cnt + ' aircraft in zone' + (_distanceZones.length > 1 ? 's' : '');
+                if (_distanceMode === 'outside') statusEl.textContent = cnt + ' aircraft outside zone' + (_distanceZones.length > 1 ? 's' : '');
+                else if (_distanceMode === 'maponly') statusEl.textContent = 'Map only mode (no aircraft filtering)';
+                else statusEl.textContent = cnt + ' aircraft in zone' + (_distanceZones.length > 1 ? 's' : '');
             } else {
                 statusEl.textContent = '';
             }
@@ -2327,9 +2817,82 @@
         if (btn) btn.className = 'button ' + (isFilterActive() ? 'activeButton' : 'inActiveButton');
     }
 
+    function buildViewsPanel() {
+        buildBreadcrumb();
+        var searchEl = document.getElementById('rf-search');
+        if (searchEl) searchEl.style.display = 'none';
+        var ctrlEl = document.getElementById('rf-controls');
+        if (ctrlEl) ctrlEl.innerHTML = '';
+        var hdrEl = document.getElementById('rf-colheader');
+        if (hdrEl) hdrEl.innerHTML = '';
+        var listEl = document.getElementById('rf-list');
+        if (listEl) {
+            var html = '<div class="rf-settings-content">' +
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Saved Views</div>' +
+                '<div class="rf-set-group-desc">Capture your current filters as reusable presets. Views are also available from the header dropdown next to map scope.</div>' +
+                '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">' +
+                '<button class="rf-cat-btn" onclick="window._rfViewsSavePrompt()">Save current as new view</button>' +
+                (_activeViewId ? '<button class="rf-cat-btn" onclick="window._rfViewsRename(\'' + _rfEscAttr(_activeViewId) + '\')">Rename active view</button>' : '') +
+                (_activeViewId ? '<button class="rf-cat-btn" onclick="window._rfViewsDeleteActive()">Delete active view</button>' : '') +
+                '</div>' +
+                '</div>';
+            if (_savedViews.length === 0) {
+                html += '<div class="rf-empty" style="margin-top:10px">No views saved yet. Build filters in any tab, then click <strong>Save View</strong>.</div>';
+            } else {
+                html += '<div class="rf-set-divider"></div><div class="rf-set-group"><div class="rf-set-group-title">Your Views (' + _savedViews.length + ')</div>';
+                for (var i = 0; i < _savedViews.length; i++) {
+                    var v = _savedViews[i];
+                    _rfEnsureViewShape(v);
+                    var isActive = _activeViewId === v.id;
+                    var when = v.updatedAt ? new Date(v.updatedAt).toLocaleString() : '';
+                    var mapModeLbl = !v.map.enabled ? 'Off' : (v.map.mode === 'fixed' ? 'Fixed' : 'Dynamic');
+                    var fixedLat = (typeof v.map.fixedCenterLat === 'number') ? v.map.fixedCenterLat.toFixed(5) : '';
+                    var fixedLon = (typeof v.map.fixedCenterLon === 'number') ? v.map.fixedCenterLon.toFixed(5) : '';
+                    var fixedZoom = (typeof v.map.fixedZoom === 'number') ? String(Math.round(v.map.fixedZoom)) : '';
+                    html += '<div class="rf-view-item' + (isActive ? ' rf-view-item-active' : '') + '">' +
+                        '<div class="rf-view-item-name">' + _rfEscText(v.name || ('View ' + (i + 1))) + '</div>' +
+                        '<div class="rf-view-item-meta">' + _rfEscText(when) + ' • Map: ' + mapModeLbl + '</div>' +
+                        '<div class="rf-view-map-cfg">' +
+                            '<label class="rf-set-toggle"><input type="checkbox"' + (v.map.enabled ? ' checked' : '') + ' onchange="window._rfViewsSetMapEnabled(\'' + _rfEscAttr(v.id) + '\',this.checked)"><div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Enable map behavior</div></div></label>' +
+                            '<div class="rf-view-inline-row">' +
+                                '<button class="rf-cat-btn' + (!v.map.enabled ? ' rf-cat-active' : '') + '" onclick="window._rfViewsSetMapMode(\'' + _rfEscAttr(v.id) + '\',\'off\')">Off</button>' +
+                                '<button class="rf-cat-btn' + (v.map.enabled && v.map.mode === 'dynamic' ? ' rf-cat-active' : '') + '" onclick="window._rfViewsSetMapMode(\'' + _rfEscAttr(v.id) + '\',\'dynamic\')">Dynamic</button>' +
+                                '<button class="rf-cat-btn' + (v.map.enabled && v.map.mode === 'fixed' ? ' rf-cat-active' : '') + '" onclick="window._rfViewsSetMapMode(\'' + _rfEscAttr(v.id) + '\',\'fixed\')">Fixed</button>' +
+                            '</div>' +
+                            '<div class="rf-view-inline-row">' +
+                                '<label class="rf-set-toggle"><input type="checkbox"' + (v.map.autoCenter ? ' checked' : '') + ' onchange="window._rfViewsSetMapToggle(\'' + _rfEscAttr(v.id) + '\',\'autoCenter\',this.checked)"><div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Auto center</div></div></label>' +
+                                '<label class="rf-set-toggle"><input type="checkbox"' + (v.map.autoZoom ? ' checked' : '') + ' onchange="window._rfViewsSetMapToggle(\'' + _rfEscAttr(v.id) + '\',\'autoZoom\',this.checked)"><div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Auto zoom</div></div></label>' +
+                            '</div>' +
+                            '<div class="rf-view-inline-row">' +
+                                '<button class="rf-cat-btn" onclick="window._rfViewsUseCurrentMap(\'' + _rfEscAttr(v.id) + '\')">Use current map</button>' +
+                            '</div>' +
+                            '<div class="rf-view-inline-row">' +
+                                '<input class="rf-dist-input rf-dist-small" type="number" step="0.00001" min="-90" max="90" value="' + _rfEscAttr(fixedLat) + '" placeholder="Lat" oninput="window._rfViewsSetFixedValue(\'' + _rfEscAttr(v.id) + '\',\'lat\',this.value)">' +
+                                '<input class="rf-dist-input rf-dist-small" type="number" step="0.00001" min="-180" max="180" value="' + _rfEscAttr(fixedLon) + '" placeholder="Lon" oninput="window._rfViewsSetFixedValue(\'' + _rfEscAttr(v.id) + '\',\'lon\',this.value)">' +
+                                '<input class="rf-dist-input rf-dist-small" type="number" step="1" min="2" max="19" value="' + _rfEscAttr(fixedZoom) + '" placeholder="Zoom" oninput="window._rfViewsSetFixedValue(\'' + _rfEscAttr(v.id) + '\',\'zoom\',this.value)">' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="rf-view-item-actions">' +
+                        '<button class="rf-cat-btn" onclick="window._rfViewsApply(\'' + _rfEscAttr(v.id) + '\')">Apply</button>' +
+                        '<button class="rf-cat-btn" onclick="window._rfViewsRename(\'' + _rfEscAttr(v.id) + '\')">Rename</button>' +
+                        '<button class="rf-cat-btn" onclick="window._rfViewsSavePrompt(\'' + _rfEscAttr(v.id) + '\')">Overwrite</button>' +
+                        '<button class="rf-cat-btn" onclick="window._rfViewsDelete(\'' + _rfEscAttr(v.id) + '\')">Delete</button>' +
+                        '</div></div>';
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+            listEl.innerHTML = html;
+        }
+        var statusEl = document.getElementById('rf-status');
+        if (statusEl) statusEl.textContent = _savedViews.length + ' saved view' + (_savedViews.length === 1 ? '' : 's');
+    }
+
     // ── Panel rendering ───────────────────────────────────────────────────────
     function buildPanel() {
         var tab = state.activeTab;
+        _rfRenderScopeHeader();
 
         // Summary tab: separate rendering path
         if (tab === 'summary') {
@@ -2346,6 +2909,12 @@
         // Distance tab: separate rendering path
         if (tab === 'distance') {
             buildDistancePanel();
+            return;
+        }
+
+        // Views tab: separate rendering path
+        if (tab === 'views') {
+            buildViewsPanel();
             return;
         }
 
@@ -2575,19 +3144,20 @@
         // Status bar
         var statusEl = document.getElementById('rf-status');
         if (statusEl) {
-            if (isFilterActive() || settings.inView) {
+            if (isFilterActive() || _panelScope !== 'all') {
                 var matched = 0;
                 if (gReady()) {
                     for (var k = 0; k < g.planesOrdered.length; k++) {
                         var plane = g.planesOrdered[k];
-                        if (settings.inView && !plane.inView) continue;
+                        if (_panelScope === 'inview' && !plane.inView) continue;
+                        if (_panelScope === 'filtered' && !planePassesAllFilters(plane, null)) continue;
                         if (planePassesAllFilters(plane, null)) matched++;
                     }
                 }
-                var inViewLabel = settings.inView ? ' (in view)' : '';
-                statusEl.textContent = matched + ' matched' + inViewLabel;
+                var scopeLabel = _panelScope !== 'all' ? ' (' + _rfScopeLabel() + ')' : '';
+                statusEl.textContent = matched + ' matched' + scopeLabel;
             } else {
-                statusEl.textContent = allEntries.length + ' items \u2022 ' + totalAircraft + ' aircraft';
+                statusEl.textContent = allEntries.length + ' items \u2022 ' + totalAircraft + ' loaded aircraft';
             }
         }
 
@@ -2663,9 +3233,182 @@
         buildPanel();
     };
 
-    window._rfSetInView = function (on) {
-        settings.inView = !!on;
+    window._rfSetPanelScope = function (mode) {
+        if (mode !== 'all' && mode !== 'inview' && mode !== 'filtered') mode = 'all';
+        if (settings.hideAllScope && mode === 'all') mode = 'inview';
+        _panelScope = mode;
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfCenterHome = function (useConfiguredZoom) {
+        _rfCenterHome(!!useConfiguredZoom);
+    };
+
+    window._rfSetHideAllScope = function (on) {
+        settings.hideAllScope = !!on;
+        if (settings.hideAllScope && _panelScope === 'all') _panelScope = 'inview';
         saveSettings();
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfSetHomeOverride = function (on) {
+        settings.homeOverride = !!on;
+        saveSettings();
+        buildPanel();
+    };
+
+    window._rfSetHomeValue = function (field, val) {
+        if (field === 'lat') settings.homeLat = val;
+        else if (field === 'lon') settings.homeLon = val;
+        else if (field === 'zoom') settings.homeZoom = parseInt(val, 10) || 12;
+        saveSettings();
+    };
+
+    window._rfUseDetectedHome = function () {
+        var d = _rfDetectHomePos();
+        if (!d) return;
+        settings.homeOverride = true;
+        settings.homeLat = d.lat.toFixed(5);
+        settings.homeLon = d.lon.toFixed(5);
+        saveSettings();
+        buildPanel();
+    };
+
+    window._rfUseDistLocForHome = function () {
+        var sel = document.getElementById('rf-home-dist-loc');
+        if (!sel) return;
+        var idx = parseInt(sel.value, 10);
+        if (isNaN(idx) || idx < 0 || idx >= _distanceLocations.length) return;
+        var loc = _distanceLocations[idx];
+        if (!loc) return;
+        var lat = parseFloat(loc.lat), lon = parseFloat(loc.lon);
+        if (isNaN(lat) || isNaN(lon)) return;
+        settings.homeOverride = true;
+        settings.homeLat = lat.toFixed(5);
+        settings.homeLon = lon.toFixed(5);
+        saveSettings();
+        buildPanel();
+    };
+
+    window._rfPickHomeFromMap = function () {
+        var m = _rfOLMap();
+        if (!m) return;
+        // Cancel previous pick handler if still attached.
+        if (_rfHomePickHandler) {
+            try { m.un('singleclick', _rfHomePickHandler); } catch (e) {}
+            _rfHomePickHandler = null;
+        }
+        var statusEl = document.getElementById('rf-status');
+        if (statusEl) statusEl.textContent = 'Click once on the map to set Home position';
+        var tgt = typeof m.getTargetElement === 'function' ? m.getTargetElement() : null;
+        if (tgt && tgt.style) tgt.style.cursor = 'crosshair';
+        _rfHomePickHandler = function (evt) {
+            var ll = _rfLonLatFromMapCoord(evt && evt.coordinate);
+            if (ll && !isNaN(ll.lat) && !isNaN(ll.lon) && Math.abs(ll.lat) <= 90 && Math.abs(ll.lon) <= 180) {
+                settings.homeOverride = true;
+                settings.homeLat = ll.lat.toFixed(5);
+                settings.homeLon = ll.lon.toFixed(5);
+                saveSettings();
+                if (state.panelOpen && state.activeTab === 'settings') buildPanel();
+            }
+            if (statusEl) statusEl.textContent = '';
+            if (tgt && tgt.style) tgt.style.cursor = '';
+            try { m.un('singleclick', _rfHomePickHandler); } catch (e) {}
+            _rfHomePickHandler = null;
+        };
+        m.on('singleclick', _rfHomePickHandler);
+    };
+
+    window._rfExportPersist = function () {
+        try {
+            var snap = _rfBuildPersistSnapshot();
+            var raw = JSON.stringify(snap, null, 2);
+            var blob = new Blob([raw], { type: 'application/json' });
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            var dt = new Date();
+            var ts = dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+            a.download = 'rf-settings-' + ts + '.json';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(function () {
+                try { URL.revokeObjectURL(a.href); } catch (e) {}
+                try { document.body.removeChild(a); } catch (e) {}
+            }, 0);
+        } catch (e) {
+            alert('Export failed: ' + e);
+        }
+    };
+
+    window._rfImportPersistPick = function () {
+        var inp = document.getElementById('rf-import-json');
+        if (!inp) return;
+        inp.value = '';
+        inp.click();
+    };
+
+    window._rfImportPersistFile = function (input) {
+        if (!input || !input.files || !input.files[0]) return;
+        var file = input.files[0];
+        var reader = new FileReader();
+        reader.onload = function () {
+            try {
+                var snap = JSON.parse(String(reader.result || '{}'));
+                if (!_rfApplyPersistSnapshot(snap)) throw new Error('Invalid snapshot');
+                saveSettings();
+                try { localStorage.setItem(TAB_VIS_KEY, JSON.stringify(_tabVisibility)); } catch (e) {}
+                try { localStorage.setItem(SUMMARY_SETTINGS_KEY, JSON.stringify(_summarySettings)); } catch (e) {}
+                try { localStorage.setItem(DIST_LS_KEY, JSON.stringify(_distanceLocations)); } catch (e) {}
+                _rfPersistViews();
+                _rfPersistDistFilter();
+                applyPanelMode();
+                applyFilter();
+                buildPanel();
+                alert('RF settings imported.');
+            } catch (e) {
+                alert('Import failed: invalid JSON/settings file');
+            }
+        };
+        reader.readAsText(file);
+    };
+
+    window._rfResetPersist = function () {
+        if (!confirm('Reset all saved RF data (home, distance, tabs, summary, cookies)?')) return;
+        try { localStorage.removeItem(SETTINGS_KEY); } catch (e) {}
+        try { localStorage.removeItem(HOME_KEY); } catch (e) {}
+        try { localStorage.removeItem('rf_persist_snapshot_v1'); } catch (e) {}
+        try { localStorage.removeItem(TAB_VIS_KEY); } catch (e) {}
+        try { localStorage.removeItem(SUMMARY_SETTINGS_KEY); } catch (e) {}
+        try { localStorage.removeItem(DIST_LS_KEY); } catch (e) {}
+        try { localStorage.removeItem(DIST_ZONES_KEY); } catch (e) {}
+        try { localStorage.removeItem(DIST_MODE_KEY); } catch (e) {}
+        try { localStorage.removeItem(VIEWS_KEY); } catch (e) {}
+        try { localStorage.removeItem(ALERTS_LS_KEY); } catch (e) {}
+        try { document.cookie = HOME_COOKIE_KEY + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'; } catch (e) {}
+        try { document.cookie = PERSIST_COOKIE_KEY + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'; } catch (e) {}
+
+        settings.displayMode = 'sidebar';
+        settings.sidebarSide = 'right';
+        settings.useLocalDb = true;
+        settings.routeKnownOnly = true;
+        settings.hideAllScope = true;
+        settings.homeOverride = false;
+        settings.homeLat = '';
+        settings.homeLon = '';
+        settings.homeZoom = 12;
+
+        Object.keys(_tabVisibility).forEach(function (k) { _tabVisibility[k] = true; });
+        Object.keys(_summarySettings).forEach(function (k) { _summarySettings[k] = true; });
+        _distanceLocations = [];
+        _distanceZones = [];
+        _distanceMode = 'inside';
+        _savedViews = [];
+        _activeViewId = '';
+
+        _rfProbeStorage();
+        applyPanelMode();
         applyFilter();
         buildPanel();
     };
@@ -2805,6 +3548,12 @@
         try {
             var cached = localStorage.getItem(DB_KEY_ROUTES_PFX + code);
             var cachedTs = parseInt(localStorage.getItem(DB_KEY_ROUTES_PFX + code + '_ts') || '0', 10);
+            var missTs = parseInt(localStorage.getItem(DB_KEY_ROUTES_PFX + code + '_miss_ts') || '0', 10);
+            // Negative cache: known missing route file, skip retries for sync window.
+            if (missTs && (Date.now() - missTs) < DB_SYNC_MS) {
+                _localDb.routesFetched[code] = true;
+                return;
+            }
             if (cached && (Date.now() - cachedTs) < DB_SYNC_MS) {
                 Object.assign(_localDb.routes, JSON.parse(cached));
                 _localDb.routesFetched[code] = true;
@@ -2829,10 +3578,17 @@
                 }
                 Object.assign(_localDb.routes, routeMap);
                 _localDb.routesFetched[code] = true;
-                try { localStorage.setItem(DB_KEY_ROUTES_PFX + code, JSON.stringify(routeMap)); localStorage.setItem(DB_KEY_ROUTES_PFX + code + '_ts', String(Date.now())); } catch(e) {}
+                try {
+                    localStorage.setItem(DB_KEY_ROUTES_PFX + code, JSON.stringify(routeMap));
+                    localStorage.setItem(DB_KEY_ROUTES_PFX + code + '_ts', String(Date.now()));
+                    localStorage.removeItem(DB_KEY_ROUTES_PFX + code + '_miss_ts');
+                } catch(e) {}
                 if (state.panelOpen) buildPanel();
             })
-            .catch(function() { _localDb.routesFetched[code] = true; }) // 404 = no routes, don't retry
+            .catch(function() {
+                _localDb.routesFetched[code] = true; // 404 = no routes, don't retry
+                try { localStorage.setItem(DB_KEY_ROUTES_PFX + code + '_miss_ts', String(Date.now())); } catch(e) {}
+            })
             .finally(function() { delete _localDb.routesFetching[code]; });
     }
 
@@ -2851,7 +3607,11 @@
         }
         // Trigger lazy fetch for this airline (first 3 alpha chars of callsign)
         var prefix = cs.replace(/[^A-Z]/g, '').substring(0, 3);
-        if (prefix.length === 3) _dbFetchRoutesForAirline(prefix);
+        if (prefix.length === 3) {
+            // Only fetch for known airline ICAO prefixes if airline DB is loaded.
+            // This suppresses noisy 404s for GA/military/special prefixes.
+            if (!settings.routeKnownOnly || !_localDb.airlines || _localDb.airlines[prefix]) _dbFetchRoutesForAirline(prefix);
+        }
         return null;
     }
 
@@ -2868,6 +3628,11 @@
         settings.useLocalDb = !!on;
         saveSettings();
         if (settings.useLocalDb) _dbAutoSync();
+        buildPanel();
+    };
+    window._rfSetRouteKnownOnly = function(on) {
+        settings.routeKnownOnly = !!on;
+        saveSettings();
         buildPanel();
     };
     window._rfDbSyncAirports = function() { _dbFetchAirports(); };
@@ -2919,11 +3684,162 @@
     function saveSettings() {
         try {
             localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-                inView:      settings.inView,
                 displayMode: settings.displayMode,
                 sidebarSide: settings.sidebarSide,
                 useLocalDb:  settings.useLocalDb,
+                routeKnownOnly: settings.routeKnownOnly,
+                hideAllScope: settings.hideAllScope,
+                homeOverride: settings.homeOverride,
+                homeLat: settings.homeLat,
+                homeLon: settings.homeLon,
+                homeZoom: settings.homeZoom,
             }));
+        } catch (e) {}
+        try {
+            // Also persist Home settings in a dedicated key so they survive
+            // schema tweaks to the main settings payload.
+            localStorage.setItem(HOME_KEY, JSON.stringify({
+                homeOverride: settings.homeOverride,
+                homeLat: settings.homeLat,
+                homeLon: settings.homeLon,
+                homeZoom: settings.homeZoom,
+            }));
+        } catch (e) {}
+        try {
+            // Dedicated home cookie backup: always tiny, so do not size-gate it.
+            if (_rfCookieOk !== false) {
+                _rfCookieSet(HOME_COOKIE_KEY, JSON.stringify({
+                    homeOverride: settings.homeOverride,
+                    homeLat: settings.homeLat,
+                    homeLon: settings.homeLon,
+                    homeZoom: settings.homeZoom,
+                }), 365);
+            }
+        } catch (e) {}
+        _rfSavePersistBackup();
+    }
+
+    function _rfCookieSet(name, value, days) {
+        try {
+            var exp = '';
+            var maxAge = '';
+            if (days) {
+                var d = new Date();
+                d.setTime(d.getTime() + (days * 24 * 60 * 60 * 1000));
+                exp = '; expires=' + d.toUTCString();
+                maxAge = '; max-age=' + String(days * 24 * 60 * 60);
+            }
+            // Try modern form first, then fallback minimal form.
+            document.cookie = name + '=' + encodeURIComponent(value) + exp + maxAge + '; path=/; SameSite=Lax';
+            if (_rfCookieGet(name) === '') {
+                document.cookie = name + '=' + encodeURIComponent(value) + exp + maxAge + '; path=/';
+            }
+        } catch (e) {}
+    }
+    function _rfCookieGet(name) {
+        try {
+            var k = name + '=';
+            var parts = (document.cookie || '').split(';');
+            for (var i = 0; i < parts.length; i++) {
+                var c = parts[i].trim();
+                if (c.indexOf(k) === 0) return decodeURIComponent(c.substring(k.length));
+            }
+        } catch (e) {}
+        return '';
+    }
+
+    function _rfProbeStorage() {
+        // Probe localStorage
+        try {
+            localStorage.setItem('__rf_probe_ls', '1');
+            _rfLocalStorageOk = localStorage.getItem('__rf_probe_ls') === '1';
+            localStorage.removeItem('__rf_probe_ls');
+        } catch (e) {
+            _rfLocalStorageOk = false;
+        }
+        // Probe cookies
+        try {
+            _rfCookieSet('__rf_probe_ck', '1', 1);
+            _rfCookieOk = _rfCookieGet('__rf_probe_ck') === '1';
+            // delete probe cookie
+            document.cookie = '__rf_probe_ck=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+        } catch (e) {
+            _rfCookieOk = false;
+        }
+    }
+
+    function _rfBuildPersistSnapshot() {
+        return {
+            v: 1,
+            savedAt: Date.now(),
+            settings: {
+                displayMode: settings.displayMode,
+                sidebarSide: settings.sidebarSide,
+                useLocalDb: settings.useLocalDb,
+                routeKnownOnly: settings.routeKnownOnly,
+                hideAllScope: settings.hideAllScope,
+                homeOverride: settings.homeOverride,
+                homeLat: settings.homeLat,
+                homeLon: settings.homeLon,
+                homeZoom: settings.homeZoom,
+            },
+            distance: {
+                locations: _distanceLocations,
+                zones: _distanceZones,
+                mode: _distanceMode,
+            },
+            tabs: _tabVisibility,
+            summary: _summarySettings,
+            views: _savedViews,
+        };
+    }
+
+    function _rfApplyPersistSnapshot(snap) {
+        if (!snap || typeof snap !== 'object') return false;
+        var s = snap.settings || {};
+        if (s.displayMode === 'popup' || s.displayMode === 'sidebar') settings.displayMode = s.displayMode;
+        if (s.sidebarSide === 'left' || s.sidebarSide === 'right') settings.sidebarSide = s.sidebarSide;
+        if (typeof s.useLocalDb === 'boolean') settings.useLocalDb = s.useLocalDb;
+        if (typeof s.routeKnownOnly === 'boolean') settings.routeKnownOnly = s.routeKnownOnly;
+        if (typeof s.hideAllScope === 'boolean') settings.hideAllScope = s.hideAllScope;
+        if (typeof s.homeOverride === 'boolean') settings.homeOverride = s.homeOverride;
+        if (typeof s.homeLat === 'string' || typeof s.homeLat === 'number') settings.homeLat = String(s.homeLat);
+        if (typeof s.homeLon === 'string' || typeof s.homeLon === 'number') settings.homeLon = String(s.homeLon);
+        if (typeof s.homeZoom === 'number' || typeof s.homeZoom === 'string') settings.homeZoom = parseInt(s.homeZoom, 10) || 12;
+
+        var d = snap.distance || {};
+        if (Array.isArray(d.locations)) _distanceLocations = d.locations;
+        if (Array.isArray(d.zones)) _distanceZones = d.zones;
+        if (d.mode === 'inside' || d.mode === 'outside' || d.mode === 'maponly') _distanceMode = d.mode;
+
+        var t = snap.tabs || {};
+        Object.keys(_tabVisibility).forEach(function (k) {
+            if (t.hasOwnProperty(k)) _tabVisibility[k] = !!t[k];
+        });
+        var ss = snap.summary || {};
+        Object.keys(_summarySettings).forEach(function (k) {
+            if (ss.hasOwnProperty(k)) _summarySettings[k] = !!ss[k];
+        });
+        if (Array.isArray(snap.views)) {
+            _savedViews = snap.views;
+            for (var vi = 0; vi < _savedViews.length; vi++) _rfEnsureViewShape(_savedViews[vi]);
+        }
+        return true;
+    }
+
+    function _rfSavePersistBackup() {
+        var raw = '';
+        try {
+            var snap = _rfBuildPersistSnapshot();
+            raw = JSON.stringify(snap);
+        } catch (e) { return; }
+        try {
+            // localStorage copy (same-origin) for export/recover convenience
+            localStorage.setItem('rf_persist_snapshot_v1', raw);
+        } catch (e) {}
+        try {
+            // Cookie backup has tight size limits; keep best-effort.
+            if (raw.length < 3500 && _rfCookieOk !== false) _rfCookieSet(PERSIST_COOKIE_KEY, raw, 365);
         } catch (e) {}
     }
 
@@ -2973,6 +3889,7 @@
         panel.style.left   = leftPos + 'px';
         panel.style.right  = '';
         panel.style.bottom = '0px';
+        _rfApplyMapInset();
     }
 
     function _rfDetachObservers() {
@@ -2980,11 +3897,90 @@
         _rfObservers = [];
     }
 
+    function _rfGetMapInsetElement() {
+        var m = _rfOLMap();
+        if (m && typeof m.getTargetElement === 'function') {
+            var te = m.getTargetElement();
+            if (te) return te;
+        }
+        return document.getElementById('map_container') ||
+               document.getElementById('layout_container') ||
+               document.getElementById('map_canvas') || null;
+    }
+
+    function _rfClearMapInset() {
+        if (!_rfMapInsetState || !_rfMapInsetState.el) return;
+        var st = _rfMapInsetState;
+        st.el.style.marginLeft  = st.marginLeft;
+        st.el.style.marginRight = st.marginRight;
+        st.el.style.width       = st.width;
+        _rfMapInsetState = null;
+    }
+
+    function _rfApplyMapInset() {
+        if (settings.displayMode !== 'sidebar' || !state.panelOpen) {
+            _rfClearMapInset();
+            return;
+        }
+        var panel = document.getElementById('rf-panel');
+        var el = _rfGetMapInsetElement();
+        if (!panel || !el) return;
+
+        if (!_rfMapInsetState || _rfMapInsetState.el !== el) {
+            _rfMapInsetState = {
+                el: el,
+                marginLeft: el.style.marginLeft || '',
+                marginRight: el.style.marginRight || '',
+                width: el.style.width || ''
+            };
+        }
+
+        var inset = Math.max(280, panel.offsetWidth || 400);
+        var pr = panel.getBoundingClientRect();
+        var panelOnLeft = ((pr.left + (pr.width / 2)) < (window.innerWidth / 2));
+        if (panelOnLeft) {
+            el.style.marginLeft = inset + 'px';
+            el.style.marginRight = '';
+        } else {
+            el.style.marginLeft = '';
+            el.style.marginRight = inset + 'px';
+        }
+        el.style.width = 'calc(100% - ' + inset + 'px)';
+    }
+
+    function _rfNudgeMainMapResize() {
+        try {
+            if (_rfMapResizeTimer) {
+                clearTimeout(_rfMapResizeTimer);
+                _rfMapResizeTimer = null;
+            }
+        } catch (e) {}
+
+        function _doResize() {
+            var m = _rfOLMap();
+            if (m) {
+                try { if (typeof m.updateSize === 'function') m.updateSize(); } catch (e1) {}
+                try { if (typeof m.render === 'function') m.render(); } catch (e2) {}
+                try { if (typeof m.renderSync === 'function') m.renderSync(); } catch (e3) {}
+            }
+            // Also emit window resize for any tar1090 listeners/layout hooks.
+            try { window.dispatchEvent(new Event('resize')); } catch (e4) {}
+        }
+
+        _doResize();
+        // Sidebar/info animations can settle a frame later; retry once after delay.
+        _rfMapResizeTimer = setTimeout(function () {
+            _rfMapResizeTimer = null;
+            _doResize();
+        }, 120);
+    }
+
     function _rfAttachObservers() {
         _rfDetachObservers();
         var targets = ['sidebar_container', 'selected_infoblock', 'layout_container']
             .map(function(id) { return document.getElementById(id); })
             .filter(Boolean);
+        var panel = document.getElementById('rf-panel');
 
         targets.forEach(function(el) {
             // Watch for size changes (sidebar resize handle dragging)
@@ -3002,6 +3998,16 @@
             mo.observe(el, opts);
             _rfObservers.push(mo);
         });
+
+        // Watch RF panel width changes from user resize drag.
+        if (panel && window.ResizeObserver) {
+            var pro = new ResizeObserver(function () {
+                _rfPositionNextToSidebar();
+                _rfNudgeMainMapResize();
+            });
+            pro.observe(panel);
+            _rfObservers.push(pro);
+        }
 
         // Reposition when the browser window is resized
         window.addEventListener('resize', _rfPositionNextToSidebar);
@@ -3025,6 +4031,9 @@
             panel.classList.add('rf-sidebar');
             _rfPositionNextToSidebar();
             _rfAttachObservers();
+            _rfNudgeMainMapResize();
+        } else {
+            _rfClearMapInset();
         }
     }
 
@@ -3032,13 +4041,35 @@
         var cmpgEl = document.getElementById('rf-al-cmpg');
         var catEl  = document.getElementById('rf-al-cat');
         var tagEl  = document.getElementById('rf-al-tag');
-        var liveEl = document.getElementById('rf-al-live');
         if (cmpgEl) _alertsFilters.cmpg     = cmpgEl.value;
         if (catEl)  _alertsFilters.category  = catEl.value;
         if (tagEl)  _alertsFilters.tag       = tagEl.value;
-        if (liveEl) _alertsFilters.liveOnly  = liveEl.checked;
         if (_alertsMapFilter) { buildAlertsMapFilterSet(); applyFilter(); }
         buildPanel();
+    };
+
+    // Clickable card badges: toggle cmpg/category/tag filter quickly.
+    window._rfAlertsQuick = function (field, value) {
+        if (!value) return;
+        if (field === 'cmpg') _alertsFilters.cmpg = (_alertsFilters.cmpg === value ? '' : value);
+        else if (field === 'category') _alertsFilters.category = (_alertsFilters.category === value ? '' : value);
+        else if (field === 'tag') _alertsFilters.tag = (_alertsFilters.tag === value ? '' : value);
+        if (_alertsMapFilter) { buildAlertsMapFilterSet(); applyFilter(); }
+        buildPanel();
+    };
+
+    window._rfClearAlertsFacets = function () {
+        _alertsFilters.cmpg = '';
+        _alertsFilters.category = '';
+        _alertsFilters.tag = '';
+        if (_alertsMapFilter) { buildAlertsMapFilterSet(); applyFilter(); }
+        buildPanel();
+    };
+
+    window._rfAlertsQuickIdx = function (idx) {
+        var d = _alertsClickData[idx];
+        if (!d || !d.type) return;
+        window._rfAlertsQuick(d.type, d.value || '');
     };
 
     window._rfToggleAlertsMap = function (on) {
@@ -3048,13 +4079,22 @@
         buildPanel();
     };
 
-    window._rfToggleAlert = function (el) {
-        var icao = el.dataset.icao;
+    window._rfToggleAlert = function (elOrIcao) {
+        var icao = '';
+        if (typeof elOrIcao === 'string') icao = elOrIcao;
+        else if (elOrIcao && elOrIcao.dataset) icao = elOrIcao.dataset.icao || '';
+        icao = (icao || '').toUpperCase();
         if (!icao) return;
         if (_alertsSelectedIcaos.has(icao)) { _alertsSelectedIcaos.delete(icao); }
         else                                { _alertsSelectedIcaos.add(icao); }
         applyFilter();
         buildPanel();
+    };
+
+    window._rfAlertsToggleIdx = function (idx) {
+        var d = _alertsClickData[idx];
+        if (!d || d.type !== 'icao') return;
+        window._rfToggleAlert(d.value || '');
     };
 
     window._rfClearAlerts = function () {
@@ -3087,7 +4127,191 @@
             applyFilter();
         }
         try { localStorage.setItem(TAB_VIS_KEY, JSON.stringify(_tabVisibility)); } catch (e) {}
+        _rfSavePersistBackup();
         buildPanel();
+    };
+
+    window._rfViewsApplyFromSelect = function (id) {
+        if (!id) return;
+        window._rfViewsApply(id);
+    };
+    window._rfViewsQuickPick = function (id) {
+        _rfQuickSelectedViewId = id || '';
+    };
+    window._rfViewsApplyQuick = function () {
+        if (!_rfQuickSelectedViewId) return;
+        window._rfViewsApply(_rfQuickSelectedViewId);
+        window._rfToggleViewQuickMenu(false);
+    };
+    window._rfToggleViewQuickMenu = function (force) {
+        var menu = document.getElementById('rf-view-quick-menu');
+        var btn = document.getElementById('rf-view-quick-btn');
+        if (!menu || !btn) return;
+        var show = (typeof force === 'boolean') ? force : (menu.style.display !== 'block');
+        menu.style.display = show ? 'block' : 'none';
+        btn.className = 'rf-view-quick-btn' + (show ? ' rf-view-quick-btn-active' : '');
+        if (show) _rfRenderViewQuickMenu();
+    };
+
+    window._rfViewsApply = function (id) {
+        var v = _rfFindViewById(id);
+        if (!v) return;
+        _rfEnsureViewShape(v);
+        if (!_rfApplyViewState(v.state || {})) return;
+        _activeViewId = id;
+        // "yes sounds good": switch to Summary when applying a view
+        state.activeTab = 'summary';
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfViewsRename = function (id) {
+        var v = _rfFindViewById(id);
+        if (!v) return;
+        var name = prompt('Rename view:', v.name || '');
+        if (name === null) return;
+        name = String(name || '').trim();
+        if (!name) return;
+        v.name = name;
+        v.updatedAt = Date.now();
+        _rfPersistViews();
+        _rfRenderScopeHeader();
+        buildPanel();
+    };
+
+    window._rfViewsSavePrompt = function (overwriteId) {
+        var existing = null;
+        if (overwriteId) {
+            for (var i = 0; i < _savedViews.length; i++) {
+                if (_savedViews[i] && _savedViews[i].id === overwriteId) { existing = _savedViews[i]; break; }
+            }
+        }
+        var name = prompt(overwriteId ? 'Update view name:' : 'Name for new view:', existing ? existing.name : '');
+        if (name === null) return;
+        name = String(name || '').trim();
+        if (!name) return;
+        var now = Date.now();
+        var stateSnap = _rfCaptureViewState();
+        var mNow = _rfGetCurrentMapSnapshot();
+        if (existing) {
+            existing.name = name;
+            existing.state = stateSnap;
+            _rfEnsureViewShape(existing);
+            if (mNow) {
+                existing.map.fixedCenterLat = mNow.lat;
+                existing.map.fixedCenterLon = mNow.lon;
+                existing.map.fixedZoom = mNow.zoom;
+            }
+            existing.updatedAt = now;
+            _activeViewId = existing.id;
+        } else {
+            var id = 'view_' + now + '_' + Math.random().toString(36).slice(2, 8);
+            var mapCfg = _rfDefaultViewMap();
+            if (mNow) {
+                mapCfg.fixedCenterLat = mNow.lat;
+                mapCfg.fixedCenterLon = mNow.lon;
+                mapCfg.fixedZoom = mNow.zoom;
+            }
+            _savedViews.push({ id: id, name: name, state: stateSnap, map: mapCfg, createdAt: now, updatedAt: now });
+            _activeViewId = id;
+        }
+        _rfPersistViews();
+        _rfRenderScopeHeader();
+        if (state.activeTab === 'views') buildPanel();
+    };
+
+    window._rfViewsDelete = function (id) {
+        var ix = -1;
+        for (var i = 0; i < _savedViews.length; i++) {
+            if (_savedViews[i] && _savedViews[i].id === id) { ix = i; break; }
+        }
+        if (ix < 0) return;
+        var nm = _savedViews[ix].name || 'this view';
+        if (!confirm('Delete view "' + nm + '"?')) return;
+        _savedViews.splice(ix, 1);
+        if (_activeViewId === id) _activeViewId = '';
+        _rfPersistViews();
+        _rfRenderScopeHeader();
+        buildPanel();
+    };
+
+    window._rfViewsDeleteActive = function () {
+        if (!_activeViewId) return;
+        window._rfViewsDelete(_activeViewId);
+    };
+
+    window._rfViewsSetMapEnabled = function (id, on) {
+        var v = _rfFindViewById(id);
+        if (!v) return;
+        _rfEnsureViewShape(v);
+        v.map.enabled = !!on;
+        v.updatedAt = Date.now();
+        _rfPersistViews();
+        if (_activeViewId === id) _rfApplyMapBehaviorConfig(v.map, true);
+        if (state.activeTab === 'views') buildPanel();
+    };
+
+    window._rfViewsSetMapMode = function (id, mode) {
+        var v = _rfFindViewById(id);
+        if (!v) return;
+        _rfEnsureViewShape(v);
+        if (mode === 'off') v.map.enabled = false;
+        else {
+            v.map.enabled = true;
+            v.map.mode = (mode === 'fixed') ? 'fixed' : 'dynamic';
+        }
+        v.updatedAt = Date.now();
+        _rfPersistViews();
+        if (_activeViewId === id) _rfApplyMapBehaviorConfig(v.map, true);
+        if (state.activeTab === 'views') buildPanel();
+    };
+
+    window._rfViewsSetMapToggle = function (id, key, on) {
+        var v = _rfFindViewById(id);
+        if (!v) return;
+        _rfEnsureViewShape(v);
+        if (key !== 'autoCenter' && key !== 'autoZoom') return;
+        v.map[key] = !!on;
+        v.updatedAt = Date.now();
+        _rfPersistViews();
+        if (_activeViewId === id) _rfApplyMapBehaviorConfig(v.map, true);
+    };
+
+    window._rfViewsUseCurrentMap = function (id) {
+        var v = _rfFindViewById(id);
+        if (!v) return;
+        _rfEnsureViewShape(v);
+        var mNow = _rfGetCurrentMapSnapshot();
+        if (!mNow) return;
+        v.map.fixedCenterLat = mNow.lat;
+        v.map.fixedCenterLon = mNow.lon;
+        v.map.fixedZoom = mNow.zoom;
+        v.updatedAt = Date.now();
+        _rfPersistViews();
+        if (state.activeTab === 'views') buildPanel();
+    };
+
+    window._rfViewsSetFixedValue = function (id, field, val) {
+        var v = _rfFindViewById(id);
+        if (!v) return;
+        _rfEnsureViewShape(v);
+        var n = parseFloat(val);
+        if (field === 'lat') {
+            if (isNaN(n) || Math.abs(n) > 90) return;
+            v.map.fixedCenterLat = n;
+        } else if (field === 'lon') {
+            if (isNaN(n) || Math.abs(n) > 180) return;
+            v.map.fixedCenterLon = n;
+        } else if (field === 'zoom') {
+            if (isNaN(n)) return;
+            if (n < 2) n = 2;
+            if (n > 19) n = 19;
+            v.map.fixedZoom = n;
+        } else {
+            return;
+        }
+        v.updatedAt = Date.now();
+        _rfPersistViews();
     };
 
     // Keep old names as aliases for backwards compat (settings HTML used them before)
@@ -3098,43 +4322,69 @@
     window._rfSetSummarySection = function (section, on) {
         _summarySettings[section] = !!on;
         try { localStorage.setItem(SUMMARY_SETTINGS_KEY, JSON.stringify(_summarySettings)); } catch (e) {}
+        _rfSavePersistBackup();
         if (state.activeTab === 'summary') buildPanel();
     };
 
     // Summary quick-filter handlers
     window._rfSumFilterIcao = function (icao) {
         icao = (icao || '').toUpperCase();
-        if (_sumFilter.has(icao)) { _sumFilter.delete(icao); } else { _sumFilter.add(icao); }
+        var adding = !_sumFilter.has(icao);
+        console.info('[RF] summary click single', icao, 'adding=', adding);
+        if (adding) {
+            _rfSaveMapView();
+            _sumFilter.add(icao);
+        } else {
+            _sumFilter.delete(icao);
+            _rfClearSelectedAircraftInTar1090();
+            if (_sumFilter.size === 0) _rfRestoreMapView();
+        }
         applyFilter();
         buildPanel();
+        if (adding) _rfPanToIcaos([icao]);
     };
 
+    // Primary handler for group filters: index into _sumClickData (avoids JSON-in-onclick).
+    window._rfSumFilterIdx = function (idx) {
+        var icaos = (_sumClickData[idx] || []);
+        console.info('[RF] summary click group idx=', idx, 'count=', icaos.length);
+        _sumFilter.clear();
+        if (icaos.length) {
+            _rfSaveMapView();
+            icaos.forEach(function(ic){ _sumFilter.add((ic || '').toUpperCase()); });
+        } else {
+            _rfClearSelectedAircraftInTar1090();
+            _rfRestoreMapView();
+        }
+        applyFilter();
+        buildPanel();
+        if (icaos.length) _rfPanToIcaos(icaos);
+    };
+
+    // Kept for any external callers; now also handles save/pan.
     window._rfSumFilterSet = function (icaos) {
         _sumFilter.clear();
-        (icaos || []).forEach(function(ic) { _sumFilter.add((ic || '').toUpperCase()); });
+        if (icaos && icaos.length) {
+            _rfSaveMapView();
+            icaos.forEach(function(ic){ _sumFilter.add((ic || '').toUpperCase()); });
+            _rfPanToIcaos(icaos);
+        } else {
+            _rfClearSelectedAircraftInTar1090();
+            _rfRestoreMapView();
+        }
         applyFilter();
         buildPanel();
     };
 
     window._rfClearSumFilter = function () {
         _sumFilter.clear();
+        _rfClearSelectedAircraftInTar1090();
+        _rfRestoreMapView();
         applyFilter();
         buildPanel();
     };
 
-    // Summary scope toggle — session-level, does NOT persist
-    window._rfSumToggleScope = function (inView) {
-        _summaryInView = !!inView;
-        if (state.activeTab === 'summary') buildPanel();
-    };
-
-    // Summary default scope — persisted so it survives page reload
-    window._rfSetSumDefaultInView = function (on) {
-        _summarySettings.defaultInView = !!on;
-        _summaryInView = !!on;
-        try { localStorage.setItem(SUMMARY_SETTINGS_KEY, JSON.stringify(_summarySettings)); } catch (e) {}
-        if (state.activeTab === 'summary') buildPanel();
-    };
+    // Legacy scope handlers removed. Scope is now controlled only via _rfSetPanelScope.
 
     // ── Distance tab handlers ─────────────────────────────────────────────────
 
@@ -3155,6 +4405,227 @@
             }
         } catch(e) {}
         return null;
+    }
+
+    // ── Map view save / restore / pan helpers ────────────────────────────────
+    // Called before any filter-driven auto-pan; only saves once per filter session.
+    function _rfSaveMapView() {
+        if (_mapViewSaved) return;
+        var m = _rfOLMap();
+        if (!m) return;
+        var v = m.getView();
+        _mapViewSaved = { center: v.getCenter().slice(), zoom: v.getZoom() };
+    }
+
+    // Animates back to the saved view and clears the snapshot.
+    function _rfRestoreMapView() {
+        if (!_mapViewSaved) return;
+        var m = _rfOLMap();
+        if (m) m.getView().animate({ center: _mapViewSaved.center, zoom: _mapViewSaved.zoom, duration: 600 });
+        _mapViewSaved = null;
+    }
+
+    // Convert lon/lat to map projection across OL builds.
+    function _rfMapCoordFromLonLat(lon, lat) {
+        if (!window.ol || !ol.proj) return null;
+        try {
+            if (typeof ol.proj.fromLonLat === 'function') return ol.proj.fromLonLat([lon, lat]);
+        } catch(e) {}
+        try {
+            if (typeof ol.proj.transform === 'function') return ol.proj.transform([lon, lat], 'EPSG:4326', 'EPSG:3857');
+        } catch(e) {}
+        return null;
+    }
+
+    function _rfLonLatFromMapCoord(coord) {
+        if (!coord || !window.ol || !ol.proj) return null;
+        try {
+            if (typeof ol.proj.toLonLat === 'function') {
+                var ll = ol.proj.toLonLat(coord);
+                if (ll && ll.length >= 2) return { lon: ll[0], lat: ll[1] };
+            }
+        } catch (e) {}
+        try {
+            if (typeof ol.proj.transform === 'function') {
+                var ll2 = ol.proj.transform(coord, 'EPSG:3857', 'EPSG:4326');
+                if (ll2 && ll2.length >= 2) return { lon: ll2[0], lat: ll2[1] };
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function _rfClearSelectedAircraftInTar1090() {
+        try { if (typeof selectPlaneByHex === 'function') { selectPlaneByHex(null); } } catch (e) {}
+        try { if (typeof selectPlaneByHex === 'function') { selectPlaneByHex(''); } } catch (e) {}
+        try { if (typeof selectPlaneByICAO === 'function') { selectPlaneByICAO(null); } } catch (e) {}
+        try { if (typeof selectPlaneByIcao === 'function') { selectPlaneByIcao(null); } } catch (e) {}
+        try { if (typeof setSelectedPlane === 'function') { setSelectedPlane(null); } } catch (e) {}
+        try { if (typeof setSelectedIcao === 'function') { setSelectedIcao(null); } } catch (e) {}
+        try { if (typeof selectPlane === 'function') { selectPlane(null); } } catch (e) {}
+        try { if (window && typeof window.selectPlaneByHex === 'function') { window.selectPlaneByHex(null); } } catch (e) {}
+        try { if (window && typeof window.selectPlaneByICAO === 'function') { window.selectPlaneByICAO(null); } } catch (e) {}
+        try { if (window && typeof window.selectPlaneByIcao === 'function') { window.selectPlaneByIcao(null); } } catch (e) {}
+        try { if (window && typeof window.setSelectedPlane === 'function') { window.setSelectedPlane(null); } } catch (e) {}
+        try { if (window && typeof window.setSelectedIcao === 'function') { window.setSelectedIcao(null); } } catch (e) {}
+        try { if (window && typeof window.selectPlane === 'function') { window.selectPlane(null); } } catch (e) {}
+        try { if (typeof SelectedPlane !== 'undefined') SelectedPlane = null; } catch (e) {}
+        try { if (typeof selectedPlane !== 'undefined') selectedPlane = null; } catch (e) {}
+        try { if (window && window.hasOwnProperty('SelectedPlane')) window.SelectedPlane = null; } catch (e) {}
+        try { if (window && window.hasOwnProperty('selectedPlane')) window.selectedPlane = null; } catch (e) {}
+        try { if (typeof refreshSelected === 'function') refreshSelected(); } catch (e) {}
+        try { if (typeof refreshSelectedPlane === 'function') refreshSelectedPlane(); } catch (e) {}
+        try { if (window && typeof window.refreshSelected === 'function') window.refreshSelected(); } catch (e) {}
+        try { if (window && typeof window.refreshSelectedPlane === 'function') window.refreshSelectedPlane(); } catch (e) {}
+        // Fallback: if infobox is still open, click a close control to untoggle
+        // tar1090's selected-aircraft info state.
+        try {
+            var ib = document.getElementById('selected_infoblock');
+            if (ib) {
+                var closeBtn = ib.querySelector('.close, .closeButton, .infoblockClose, .btn-close, button[title*="Close"], button[aria-label*="Close"]');
+                if (!closeBtn) {
+                    var btns = ib.querySelectorAll('button');
+                    for (var bi = 0; bi < btns.length; bi++) {
+                        var t = ((btns[bi].textContent || '') + '').trim();
+                        if (t === '×' || t === '✕' || t === '✖' || t === 'X') { closeBtn = btns[bi]; break; }
+                    }
+                }
+                if (closeBtn) closeBtn.click();
+            }
+        } catch (e) {}
+    }
+
+    // Resolve plane coordinates robustly (supports [lon,lat] and [lat,lon]).
+    function _rfPlaneLatLon(plane) {
+        if (!plane) return null;
+        if (plane.position && plane.position.length >= 2) {
+            var a = +plane.position[0], b = +plane.position[1];
+            // tar1090 normal convention is [lon, lat]
+            if (!isNaN(a) && !isNaN(b) && Math.abs(a) <= 180 && Math.abs(b) <= 90) return { lat: b, lon: a };
+            // fallback in case source provides [lat, lon]
+            if (!isNaN(a) && !isNaN(b) && Math.abs(a) <= 90 && Math.abs(b) <= 180) return { lat: a, lon: b };
+        }
+        var lat = +plane.lat, lon = +plane.lon;
+        if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return { lat: lat, lon: lon };
+        return null;
+    }
+
+    // Pan / fit the OL map to show the given array of ICAOs at their current positions.
+    function _rfPanToIcaos(icaos) {
+        if (!icaos || !icaos.length) return;
+        var m = _rfOLMap();
+        if (!m || !g || !g.planesOrdered) { console.warn('[RF] pan skip: map/planes unavailable'); return; }
+        var icaoSet = new Set(icaos.map(function(ic){ return (ic || '').toUpperCase(); }));
+        var pts = [];
+        for (var pti = 0; pti < g.planesOrdered.length; pti++) {
+            var pp = g.planesOrdered[pti];
+            if (!icaoSet.has((pp.icao || '').toUpperCase())) continue;
+            var ll = _rfPlaneLatLon(pp);
+            if (ll && (ll.lat !== 0 || ll.lon !== 0)) {
+                var mc = _rfMapCoordFromLonLat(ll.lon, ll.lat);
+                if (mc) pts.push(mc);
+            }
+        }
+        if (!pts.length) { console.warn('[RF] pan skip: no matching positions for', icaos.length, 'icaos'); return; }
+        var view = m.getView();
+        if (!view) { console.warn('[RF] pan skip: no map view'); return; }
+        if (pts.length === 1) {
+            view.animate({ center: pts[0], zoom: Math.max(view.getZoom(), 10), duration: 600 });
+        } else {
+            // Avoid relying on ol.extent being present in all builds.
+            var minX = pts[0][0], minY = pts[0][1], maxX = pts[0][0], maxY = pts[0][1];
+            for (var ei = 1; ei < pts.length; ei++) {
+                if (pts[ei][0] < minX) minX = pts[ei][0];
+                if (pts[ei][1] < minY) minY = pts[ei][1];
+                if (pts[ei][0] > maxX) maxX = pts[ei][0];
+                if (pts[ei][1] > maxY) maxY = pts[ei][1];
+            }
+            view.fit([minX, minY, maxX, maxY], { padding: [60, 60, 60, 60], maxZoom: 11, duration: 600 });
+        }
+        console.info('[RF] pan applied to', pts.length, 'aircraft');
+    }
+
+    // Save/restore helpers for global auto-fit (all tabs).
+    function _rfSaveAutoFitView() {
+        if (_autoFitSavedView) return;
+        var m = _rfOLMap();
+        if (!m || !m.getView) return;
+        var v = m.getView();
+        _autoFitSavedView = { center: v.getCenter().slice(), zoom: v.getZoom() };
+    }
+    function _rfRestoreAutoFitView() {
+        if (!_autoFitSavedView) return;
+        var m = _rfOLMap();
+        if (m && m.getView) m.getView().animate({ center: _autoFitSavedView.center, zoom: _autoFitSavedView.zoom, duration: 700 });
+        _autoFitSavedView = null;
+    }
+
+    // Fit current map to all aircraft that pass the active cross-tab filters.
+    function _rfAutoFitFilteredPlanes(opts) {
+        opts = opts || {};
+        var doCenter = opts.autoCenter !== false;
+        var doZoom = opts.autoZoom !== false;
+        var m = _rfOLMap();
+        if (!m || !m.getView || !gReady()) return;
+        if (!doCenter && !doZoom) return;
+        if (!isFilterActive()) {
+            _rfRestoreAutoFitView();
+            return;
+        }
+        _rfSaveAutoFitView();
+        var pts = [];
+        for (var i = 0; i < g.planesOrdered.length; i++) {
+            var p = g.planesOrdered[i];
+            if (!planePassesAllFilters(p)) continue;
+            var ll = _rfPlaneLatLon(p);
+            if (!ll || (ll.lat === 0 && ll.lon === 0)) continue;
+            var mc = _rfMapCoordFromLonLat(ll.lon, ll.lat);
+            if (mc) pts.push(mc);
+        }
+        if (!pts.length) return;
+
+        var view = m.getView();
+        if (pts.length === 1) {
+            var oneOpts = { duration: opts.forceNow ? 650 : 700 };
+            if (doCenter) oneOpts.center = pts[0];
+            if (doZoom) oneOpts.zoom = Math.max(view.getZoom(), 10);
+            view.animate(oneOpts);
+            return;
+        }
+        var minX = pts[0][0], minY = pts[0][1], maxX = pts[0][0], maxY = pts[0][1];
+        for (var pi = 1; pi < pts.length; pi++) {
+            if (pts[pi][0] < minX) minX = pts[pi][0];
+            if (pts[pi][1] < minY) minY = pts[pi][1];
+            if (pts[pi][0] > maxX) maxX = pts[pi][0];
+            if (pts[pi][1] > maxY) maxY = pts[pi][1];
+        }
+        if (doCenter && doZoom) {
+            view.fit([minX, minY, maxX, maxY], { padding: [60, 60, 60, 60], maxZoom: 11, duration: opts.forceNow ? 650 : 700 });
+            return;
+        }
+        var cx = (minX + maxX) / 2;
+        var cy = (minY + maxY) / 2;
+        var target = { duration: opts.forceNow ? 650 : 700 };
+        if (doCenter) target.center = [cx, cy];
+        if (doZoom) {
+            var z = view.getZoom();
+            try {
+                var size = (typeof m.getSize === 'function') ? m.getSize() : null;
+                if (size && size[0] > 10 && size[1] > 10 && typeof view.getResolutionForExtent === 'function' && typeof view.getZoomForResolution === 'function') {
+                    var pad = 60;
+                    var fitW = Math.max(20, size[0] - (pad * 2));
+                    var fitH = Math.max(20, size[1] - (pad * 2));
+                    var res = view.getResolutionForExtent([minX, minY, maxX, maxY], [fitW, fitH]);
+                    if (typeof res === 'number' && res > 0) {
+                        var zFit = view.getZoomForResolution(res);
+                        if (typeof zFit === 'number' && !isNaN(zFit)) z = zFit;
+                    }
+                }
+            } catch (e) {}
+            if (z < 2) z = 2;
+            if (z > 19) z = 19;
+            target.zoom = z;
+        }
+        view.animate(target);
     }
 
     function _rfGetReceiverPos() {
@@ -3295,6 +4766,8 @@
             } else {
                 localStorage.removeItem(DIST_ZONES_KEY);
             }
+            localStorage.setItem(DIST_MODE_KEY, _distanceMode);
+            _rfSavePersistBackup();
         } catch(e) {}
     }
 
@@ -3525,7 +4998,6 @@
         if (existingIdx >= 0) {
             _distanceZones.splice(existingIdx, 1);
         } else {
-            if (settings.inView) { settings.inView = false; saveSettings(); }
             _distanceZones.push({
                 lat: loc.lat, lon: loc.lon, radiusNm: loc.radiusNm, name: loc.name,
                 altMode: _distanceForm.altMode,
@@ -3560,6 +5032,7 @@
             _distanceForm.locationIdx    = _distanceLocations.length - 1;
         }
         try { localStorage.setItem(DIST_LS_KEY, JSON.stringify(_distanceLocations)); } catch (e) {}
+        _rfSavePersistBackup();
         // Add or update in active zones
         var savedZone = {
             lat: loc.lat, lon: loc.lon, radiusNm: loc.radiusNm, name: loc.name,
@@ -3573,7 +5046,6 @@
         }
         if (existingZoneIdx >= 0) _distanceZones[existingZoneIdx] = savedZone;
         else _distanceZones.push(savedZone);
-        if (settings.inView) { settings.inView = false; saveSettings(); }
         _rfPersistDistFilter();
         applyFilter();
         buildPanel();
@@ -3587,6 +5059,7 @@
         _distanceLocations.splice(idx, 1);
         _distanceForm.locationIdx = -1;
         try { localStorage.setItem(DIST_LS_KEY, JSON.stringify(_distanceLocations)); } catch (e) {}
+        _rfSavePersistBackup();
         // Also remove from active zones if it was active
         _distanceZones = _distanceZones.filter(function(z) { return z.name !== locName; });
         _rfPersistDistFilter();
@@ -3598,6 +5071,14 @@
         _distanceForm.altMode = mode;
         var rangeEl = document.getElementById('rf-dist-alt-range');
         if (rangeEl) rangeEl.style.display = mode === 'between' ? '' : 'none';
+    };
+
+    window._rfSetDistMode = function (mode) {
+        if (mode !== 'inside' && mode !== 'outside' && mode !== 'maponly') mode = 'inside';
+        _distanceMode = mode;
+        try { localStorage.setItem(DIST_MODE_KEY, _distanceMode); } catch(e) {}
+        applyFilter();
+        buildPanel();
     };
 
     window._rfDistApply = function () {
@@ -3634,8 +5115,6 @@
         }
         if (existingApplyIdx >= 0) _distanceZones[existingApplyIdx] = newZone;
         else _distanceZones.push(newZone);
-        // In-view restriction would hide planes that are within range but panned off screen.
-        if (settings.inView) { settings.inView = false; saveSettings(); }
         _rfPersistDistFilter();
         applyFilter();
         buildPanel();
@@ -3674,6 +5153,7 @@
         _alertsSelectedIcaos.clear();
         _distanceZones = [];
         _sumFilter.clear();
+        _rfRestoreMapView();
         applyFilter();
         buildPanel();
     };
@@ -3687,6 +5167,8 @@
         state.panelOpen = false;
         var panel = document.getElementById('rf-panel');
         if (panel) panel.style.display = 'none';
+        _rfClearMapInset();
+        if (settings.displayMode === 'sidebar') _rfNudgeMainMapResize();
     };
 
     // ── Toggle panel ──────────────────────────────────────────────────────────
@@ -3695,7 +5177,18 @@
         var panel = document.getElementById('rf-panel');
         if (!panel) return;
         panel.style.display = state.panelOpen ? 'flex' : 'none';
-        if (state.panelOpen) { applyPanelMode(); buildPanel(); }
+        if (state.panelOpen) {
+            applyPanelMode();
+            buildPanel();
+            if (!_rfDidInitialHomeCenter) {
+                _rfCenterHome(true);
+                _rfDidInitialHomeCenter = true;
+            }
+            if (settings.displayMode === 'sidebar') _rfNudgeMainMapResize();
+        } else {
+            _rfClearMapInset();
+            if (settings.displayMode === 'sidebar') _rfNudgeMainMapResize();
+        }
     }
 
     // ── Drag support ──────────────────────────────────────────────────────────
@@ -3723,10 +5216,54 @@
         });
     }
 
+    function makeSidebarResizable(panel, handle) {
+        if (!panel || !handle) return;
+        handle.addEventListener('mousedown', function (e) {
+            if (settings.displayMode !== 'sidebar') return;
+            var startX = e.clientX;
+            var startW = panel.offsetWidth || 400;
+            var rect = panel.getBoundingClientRect();
+            var panelOnLeft = ((rect.left + (rect.width / 2)) < (window.innerWidth / 2));
+            var minW = 300;
+            var maxW = Math.max(minW + 20, Math.floor(window.innerWidth * 0.55));
+            document.body.style.userSelect = 'none';
+
+            function onMove(ev) {
+                var dx = ev.clientX - startX;
+                var next = panelOnLeft ? (startW + dx) : (startW - dx);
+                if (next < minW) next = minW;
+                if (next > maxW) next = maxW;
+                panel.style.width = next + 'px';
+                _rfPositionNextToSidebar();
+            }
+            function onUp() {
+                document.body.style.userSelect = '';
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                _rfNudgeMainMapResize();
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+            e.preventDefault();
+            e.stopPropagation();
+        });
+    }
+
     // ── DOM injection ─────────────────────────────────────────────────────────
+    function _rfIsEditingInputs() {
+        if (!state.panelOpen) return false;
+        var ae = document.activeElement;
+        if (!ae) return false;
+        var tag = (ae.tagName || '').toUpperCase();
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return false;
+        var panel = document.getElementById('rf-panel');
+        return !!(panel && panel.contains(ae));
+    }
+
     function inject() {
         var headerSide = document.getElementById('header_side');
         if (!headerSide || document.getElementById('rf-btn')) return;
+        _rfProbeStorage();
 
         var btnContainer = headerSide.querySelector('.buttonContainer') || headerSide;
 
@@ -3749,8 +5286,13 @@
         panel.innerHTML = [
             '<div class="rf-header" id="rf-drag-handle">',
             '  <span>Robs Filters</span>',
-            '  <button class="rf-close" onclick="window._rfClosePanel()">&#x2715;</button>',
+            '  <div class="rf-header-actions">',
+            '    <button class="rf-resize-handle" id="rf-resize-handle" title="Resize sidebar panel" aria-label="Resize sidebar panel">&#8644;</button>',
+            '    <button class="rf-view-quick-btn" id="rf-view-quick-btn" title="Views quick menu" aria-label="Views quick menu" onclick="event.stopPropagation();window._rfToggleViewQuickMenu()">&#128065;</button>',
+            '    <button class="rf-close" onclick="window._rfClosePanel()">&#x2715;</button>',
+            '  </div>',
             '</div>',
+            '<div id="rf-view-quick-menu" class="rf-view-quick-menu" style="display:none"></div>',
             '<div id="rf-breadcrumb" class="rf-breadcrumb" style="display:none"></div>',
             '<input id="rf-search" class="rf-search" type="text" placeholder="Search\u2026" oninput="window._rfOnSearch(this.value)">',
             '<div class="rf-tabs">',
@@ -3759,10 +5301,12 @@
             '  <div id="rf-tab-countries" class="rf-tab"               onclick="window._rfSwitchTab(\'countries\')">Countries</div>',
             '  <div id="rf-tab-operators" class="rf-tab"               onclick="window._rfSwitchTab(\'operators\')">Operators</div>',
             '  <div id="rf-tab-aircraft"  class="rf-tab"               onclick="window._rfSwitchTab(\'aircraft\')">Aircraft</div>',
+            '  <div id="rf-tab-views"     class="rf-tab"               onclick="window._rfSwitchTab(\'views\')">Views</div>',
             '  <div id="rf-tab-alerts"    class="rf-tab"               onclick="window._rfSwitchTab(\'alerts\')">Alerts</div>',
             '  <div id="rf-tab-distance"  class="rf-tab"               onclick="window._rfSwitchTab(\'distance\')">Distance</div>',
             '  <div id="rf-tab-settings"  class="rf-tab rf-tab-gear"   onclick="window._rfSwitchTab(\'settings\')">&#9881;</div>',
             '</div>',
+            '<div id="rf-scope-global" class="rf-scope-global"></div>',
             '<div id="rf-controls" class="rf-controls"></div>',
             '<div id="rf-colheader" class="rf-colheader"></div>',
             '<div id="rf-list" class="rf-list"></div>',
@@ -3774,14 +5318,65 @@
 
         document.body.appendChild(panel);
         makeDraggable(panel, document.getElementById('rf-drag-handle'));
+        makeSidebarResizable(panel, document.getElementById('rf-resize-handle'));
+        document.addEventListener('mousedown', function(evt) {
+            var menu = document.getElementById('rf-view-quick-menu');
+            var btn = document.getElementById('rf-view-quick-btn');
+            if (!menu || menu.style.display !== 'block') return;
+            var t = evt.target;
+            if (menu.contains(t) || (btn && btn.contains(t))) return;
+            window._rfToggleViewQuickMenu(false);
+        });
 
         // Load persisted settings
         try {
             var sv = localStorage.getItem(SETTINGS_KEY);
-            if (sv) { var sp = JSON.parse(sv); if (typeof sp.inView === 'boolean') settings.inView = sp.inView; if (sp.displayMode === 'popup' || sp.displayMode === 'sidebar') settings.displayMode = sp.displayMode; if (sp.sidebarSide === 'left') settings.sidebarSide = 'left'; if (typeof sp.useLocalDb === 'boolean') settings.useLocalDb = sp.useLocalDb; }
+            if (sv) {
+                var sp = JSON.parse(sv);
+                if (sp.displayMode === 'popup' || sp.displayMode === 'sidebar') settings.displayMode = sp.displayMode;
+                if (sp.sidebarSide === 'left') settings.sidebarSide = 'left';
+                if (typeof sp.useLocalDb === 'boolean') settings.useLocalDb = sp.useLocalDb;
+                if (typeof sp.routeKnownOnly === 'boolean') settings.routeKnownOnly = sp.routeKnownOnly;
+                if (typeof sp.hideAllScope === 'boolean') settings.hideAllScope = sp.hideAllScope;
+                if (typeof sp.homeOverride === 'boolean') settings.homeOverride = sp.homeOverride;
+                if (typeof sp.homeLat === 'string' || typeof sp.homeLat === 'number') settings.homeLat = String(sp.homeLat);
+                if (typeof sp.homeLon === 'string' || typeof sp.homeLon === 'number') settings.homeLon = String(sp.homeLon);
+                if (typeof sp.homeZoom === 'number' || typeof sp.homeZoom === 'string') settings.homeZoom = parseInt(sp.homeZoom, 10) || 12;
+            }
+            // Dedicated home key takes precedence if present.
+            var hv = localStorage.getItem(HOME_KEY);
+            if (hv) {
+                var hp = JSON.parse(hv);
+                if (typeof hp.homeOverride === 'boolean') settings.homeOverride = hp.homeOverride;
+                if (typeof hp.homeLat === 'string' || typeof hp.homeLat === 'number') settings.homeLat = String(hp.homeLat);
+                if (typeof hp.homeLon === 'string' || typeof hp.homeLon === 'number') settings.homeLon = String(hp.homeLon);
+                if (typeof hp.homeZoom === 'number' || typeof hp.homeZoom === 'string') settings.homeZoom = parseInt(hp.homeZoom, 10) || 12;
+            }
+            // Dedicated home cookie backup (used when localStorage is wiped on browser close).
+            var hcv = _rfCookieGet(HOME_COOKIE_KEY);
+            if (hcv) {
+                var hcp = JSON.parse(hcv);
+                if (typeof hcp.homeOverride === 'boolean') settings.homeOverride = hcp.homeOverride;
+                if (typeof hcp.homeLat === 'string' || typeof hcp.homeLat === 'number') settings.homeLat = String(hcp.homeLat);
+                if (typeof hcp.homeLon === 'string' || typeof hcp.homeLon === 'number') settings.homeLon = String(hcp.homeLon);
+                if (typeof hcp.homeZoom === 'number' || typeof hcp.homeZoom === 'string') settings.homeZoom = parseInt(hcp.homeZoom, 10) || 12;
+            }
+            // If localStorage was wiped, try cookie backup snapshot.
+            if (!sv && !hv) {
+                var cv = _rfCookieGet(PERSIST_COOKIE_KEY);
+                if (cv) _rfApplyPersistSnapshot(JSON.parse(cv));
+            }
             applyPanelMode();
             if (settings.useLocalDb) _dbAutoSync();
         } catch (e) {}
+        try {
+            var vv = localStorage.getItem(VIEWS_KEY);
+            if (vv) {
+                var vp = JSON.parse(vv);
+                if (Array.isArray(vp)) _savedViews = vp;
+            }
+            for (var vi = 0; vi < _savedViews.length; vi++) _rfEnsureViewShape(_savedViews[vi]);
+        } catch (e) { _savedViews = []; }
         try {
             var tv = localStorage.getItem(TAB_VIS_KEY);
             if (tv) {
@@ -3791,6 +5386,7 @@
                 });
             }
         } catch (e) {}
+        // photos toggle removed in basic alerts mode
         try {
             var ssv = localStorage.getItem(SUMMARY_SETTINGS_KEY);
             if (ssv) {
@@ -3800,8 +5396,9 @@
                 });
             }
         } catch (e) {}
-        // Apply the persisted default scope to the session variable
-        _summaryInView = !!_summarySettings.defaultInView;
+        // Apply the persisted default scope to the runtime session scope
+        _panelScope = 'all';
+        if (settings.hideAllScope && _panelScope === 'all') _panelScope = 'inview';
         try {
             var distSaved = localStorage.getItem(DIST_LS_KEY);
             if (distSaved) _distanceLocations = JSON.parse(distSaved) || [];
@@ -3828,6 +5425,10 @@
                 }
             }
         } catch(e) { _distanceZones = []; }
+        try {
+            var dm = localStorage.getItem(DIST_MODE_KEY);
+            if (dm === 'inside' || dm === 'outside' || dm === 'maponly') _distanceMode = dm;
+        } catch(e) {}
 
         installFilterHook();
 
@@ -3845,13 +5446,16 @@
             }
         });
 
+        // Keep backup snapshot fresh on startup too.
+        _rfSavePersistBackup();
+
         if (_tabVisibility.alerts) loadAlerts(false);
 
         // Also update tab active highlight correctly (tabs are managed via class, not DOM state)
         // Re-wire _rfSwitchTab to update tab highlights
         var origSwitch = window._rfSwitchTab;
         window._rfSwitchTab = function (tab) {
-            ['summary','airports','countries','operators','aircraft','alerts','distance','settings'].forEach(function (t) {
+            ['summary','airports','countries','operators','aircraft','views','alerts','distance','settings'].forEach(function (t) {
                 var el = document.getElementById('rf-tab-' + t);
                 if (el) el.className = 'rf-tab' + (t === 'settings' ? ' rf-tab-gear' : '') + (t === tab ? ' rf-tab-active' : '');
             });
@@ -3872,14 +5476,22 @@
                             for (var ti = 0; ti < g.planesOrdered.length; ti++) {
                                 if (planePassesDistanceFilter(g.planesOrdered[ti])) cnt2++;
                             }
-                            statusEl2.textContent = cnt2 + ' aircraft in zone' + (_distanceZones.length > 1 ? 's' : '');
+                            if (_distanceMode === 'outside') statusEl2.textContent = cnt2 + ' aircraft outside zone' + (_distanceZones.length > 1 ? 's' : '');
+                            else if (_distanceMode === 'maponly') statusEl2.textContent = 'Map only mode (no aircraft filtering)';
+                            else statusEl2.textContent = cnt2 + ' aircraft in zone' + (_distanceZones.length > 1 ? 's' : '');
                         } else {
                             statusEl2.textContent = '';
                         }
                     }
                 } else {
-                    buildPanel();
+                    // Avoid stealing cursor/focus while user is typing in panel inputs.
+                    if (!_rfIsEditingInputs()) buildPanel();
                 }
+            }
+            // Keep active view map behavior synced as aircraft move.
+            var avTick = _rfGetActiveView();
+            if (avTick && avTick.map && avTick.map.enabled) {
+                _rfApplyMapBehaviorConfig(avTick.map, false);
             }
             if (isFilterActive()) triggerRedraw();
         }, 3000);
@@ -3888,6 +5500,7 @@
     // ── Debug helper ──────────────────────────────────────────────────────────
     window.rfDebug = function () {
         try {
+            console.log('[RF] build:', RF_BUILD);
             getAircraftData(); // populate _aircraftIcaoMap/_aircraftAdsbCat/_aircraftWtc
             var planes = g.planesOrdered || [];
             console.log('[RF] Total aircraft:', planes.length);
@@ -3937,12 +5550,61 @@
 
             var cacheKeys = Object.keys(g.route_cache || {});
             console.log('[RF] route_cache entries:', cacheKeys.length);
+
+            // Alert DB matching diagnostics
+            var liveSet = new Set();
+            planes.forEach(function(p) { if (p.icao) liveSet.add((p.icao + '').toUpperCase()); });
+            var alertCount = _alertsDb ? _alertsDb.length : 0;
+            var matches = 0, sample = [];
+            if (_alertsDb) {
+                _alertsDb.forEach(function(a) {
+                    var ic = (a.icao || '').toUpperCase();
+                    if (liveSet.has(ic)) {
+                        matches++;
+                        if (sample.length < 12) sample.push(ic);
+                    }
+                });
+            }
+            console.log('[RF] alerts db status:', {
+                loaded: !!_alertsDb,
+                fetching: _alertsFetching,
+                error: _alertsError,
+                rows: alertCount,
+                liveMatches: matches,
+                sampleMatches: sample
+            });
+            console.log('[RF] storage status:', {
+                localStorageOk: _rfLocalStorageOk,
+                cookieOk: _rfCookieOk,
+                settingsKey: !!localStorage.getItem(SETTINGS_KEY),
+                homeKey: !!localStorage.getItem(HOME_KEY),
+                homeCookie: _rfCookieGet(HOME_COOKIE_KEY) ? 'present' : 'missing',
+                persistCookie: _rfCookieGet(PERSIST_COOKIE_KEY) ? 'present' : 'missing',
+            });
+            var fnCandidates = [
+                'selectPlaneByHex','selectPlaneByICAO','selectPlaneByIcao','selectPlane',
+                'setSelectedPlane','setSelectedIcao',
+                'setFollowSelected','toggleFollowSelected',
+                'setShowTrace','toggleShowTrace',
+                'refreshSelected','refreshSelectedPlane'
+            ];
+            var fnFound = [];
+            for (var fi = 0; fi < fnCandidates.length; fi++) {
+                var nm = fnCandidates[fi];
+                try { if (window && typeof window[nm] === 'function') fnFound.push(nm); } catch (e) {}
+            }
+            var varState = {};
+            try { varState.FollowSelected = (typeof FollowSelected !== 'undefined') ? FollowSelected : '(undef)'; } catch (e) { varState.FollowSelected = '(err)'; }
+            try { varState.showTrace = (typeof showTrace !== 'undefined') ? showTrace : '(undef)'; } catch (e) { varState.showTrace = '(err)'; }
+            try { varState.ShowTrace = (typeof ShowTrace !== 'undefined') ? ShowTrace : '(undef)'; } catch (e) { varState.ShowTrace = '(err)'; }
+            try { varState.SelectedPlane = (typeof SelectedPlane !== 'undefined') ? SelectedPlane : '(undef)'; } catch (e) { varState.SelectedPlane = '(err)'; }
+            console.log('[RF] track hooks detected:', { functions: fnFound, vars: varState });
         } catch (e) {
             console.error('[RF] debug error:', e);
         }
     };
 
-    console.log('[robs-filter] loaded - run window.rfDebug() in console to inspect data');
+    console.log('[robs-filter] loaded build=' + RF_BUILD + ' - run window.rfDebug() in console to inspect data');
 
     // ── Helpers ───────────────────────────────────────────────────────────────
     function gReady() {

@@ -4,8 +4,8 @@
     position: fixed;
     top: 60px;
     right: 10px;
-    width: 400px;
-    max-height: calc(100vh - 80px);
+    width: 360px;
+    max-height: calc(100vh - 70px);
     background: var(--BGCOLOR1, #1a1a1a);
     border: 1px solid var(--ACCENT, #00596b);
     border-radius: 4px;
@@ -14,22 +14,28 @@
     z-index: 9999;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
     font-family: inherit;
-    font-size: 13px;
+    font-size: 12px;
     color: #fff;
 }
 
 /* ── Header ─────────────────────────────────────────────────────────────── */
 .rf-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 8px 10px;
+    padding: 6px 8px;
     background: var(--ACCENT, #00596b);
     font-weight: bold;
-    font-size: 13px;
+    font-size: 12px;
     border-radius: 3px 3px 0 0;
     cursor: move;
     user-select: none;
+}
+
+.rf-header-actions {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
 }
 
 .rf-close {
@@ -44,10 +50,69 @@
 }
 .rf-close:hover { opacity: 1; }
 
+.rf-resize-handle {
+    background: none;
+    border: none;
+    color: #cfefff;
+    cursor: ew-resize;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 4px;
+    opacity: 0.85;
+}
+.rf-resize-handle:hover { opacity: 1; color: #fff; }
+.rf-view-quick-btn {
+    background: none;
+    border: none;
+    color: #cfefff;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 4px;
+    opacity: 0.9;
+}
+.rf-view-quick-btn:hover { color: #fff; opacity: 1; }
+.rf-view-quick-btn-active { color: #fff; text-shadow: 0 0 6px rgba(255,255,255,0.5); }
+.rf-view-quick-menu {
+    position: absolute;
+    top: 28px;
+    right: 28px;
+    min-width: 220px;
+    max-width: 260px;
+    background: #1a1a1a;
+    border: 1px solid #2f5d67;
+    border-radius: 6px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+    z-index: 10020;
+    padding: 8px;
+}
+.rf-view-quick-head {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: #8fd9ea;
+    margin-bottom: 6px;
+}
+.rf-view-quick-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 7px;
+    flex-wrap: wrap;
+}
+.rf-active-view-badge-empty {
+    font-size: 10px;
+    color: #78929a;
+    margin-bottom: 6px;
+}
+.rf-views-select-compact {
+    width: 100%;
+    max-width: none;
+}
+
 /* ── Search ──────────────────────────────────────────────────────────────── */
 .rf-search {
-    margin: 8px 8px 4px 8px;
-    padding: 5px 8px;
+    margin: 6px 8px 3px 8px;
+    padding: 4px 7px;
     background: var(--BGCOLOR2, #2a2a2a);
     border: 1px solid #444;
     border-radius: 3px;
@@ -139,7 +204,7 @@
 .rf-chip-x:hover { opacity: 1; color: #fff; }
 
 /* ── Direction toggle (airports + countries) ─────────────────────────────── */
-.rf-controls { padding: 6px 8px 2px 8px; min-height: 0; }
+.rf-controls { padding: 4px 8px 2px 8px; min-height: 0; }
 
 .rf-direction {
     display: flex;
@@ -257,7 +322,7 @@
 .rf-list {
     overflow-y: auto;
     flex: 1;
-    padding: 4px 8px;
+    padding: 3px 8px;
     min-height: 80px;
     max-height: 50vh;
 }
@@ -586,13 +651,111 @@
 .rf-mi-photo-credit   { font-size: 10px; color: #555; margin-top: 3px; }
 .rf-mi-img-loading, .rf-mi-img-none { font-size: 11px; color: #555; font-style: italic; }
 
+/* Alerts v2: intel-board cards */
+.rf-al-hot-wrap {
+    border: 1px solid #2a2a2a;
+    background: #1a1a1a;
+    border-radius: 4px;
+    margin: 0 0 6px;
+    padding: 6px;
+}
+.rf-al-hot-title {
+    font-size: 10px;
+    color: #e8a87c;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 4px;
+    font-weight: 700;
+}
+.rf-al-hot-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.rf-al-hot-chip {
+    border: 1px solid #444;
+    background: #222;
+    color: #ddd;
+    border-radius: 12px;
+    padding: 2px 8px;
+    font-size: 10px;
+    cursor: pointer;
+}
+.rf-al-hot-chip:hover { border-color: var(--ACCENT, #00596b); color: #fff; }
+.rf-al-hot-icao { font-family: monospace; font-weight: 700; }
+.rf-al-hot-reg { margin-left: 5px; color: #888; }
+
+.rf-al-card { display: block; padding: 6px 8px; }
+.rf-al-card-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.rf-al-thumb-wrap {
+    width: 34px;
+    height: 22px;
+    border: 1px solid #333;
+    border-radius: 3px;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #151515;
+    flex-shrink: 0;
+}
+.rf-al-thumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.rf-al-thumb-ph {
+    font-size: 11px;
+    color: #666;
+}
+.rf-al-card-sub {
+    margin-top: 2px;
+    padding-left: 14px;
+}
+.rf-al-card-tags {
+    margin-top: 4px;
+    padding-left: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+.rf-al-pill {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 10px;
+    padding: 1px 6px;
+    font-size: 9px;
+    letter-spacing: 0.2px;
+    border: 1px solid #444;
+    background: #1a1a1a;
+    color: #bbb;
+    cursor: pointer;
+    line-height: 1.4;
+}
+.rf-al-pill:hover { border-color: var(--ACCENT, #00596b); color: #fff; }
+.rf-al-pill-cmpg { border-color: #5a4d2a; color: #f0e0a8; }
+.rf-al-pill-cat { border-color: #2e5a6e; color: #9ad8ff; text-transform: uppercase; }
+.rf-al-pill-tag { border-color: #37593a; color: #a9e0b0; }
+.rf-al-pill-link {
+    border-color: var(--ACCENT, #00596b);
+    color: #9be7f7;
+    text-decoration: none;
+}
+.rf-al-pill-link:hover { color: #fff; }
+.rf-muted { color: #666; }
+
 /* ── Sidebar mode ────────────────────────────────────────────────────────── */
 /* All position values (top/left/right/bottom) set dynamically by JS          */
 /* to sit flush beside #sidebar_container / #selected_infoblock               */
 #rf-panel.rf-sidebar {
     max-height: none !important;
     border-radius: 0 !important;
-    width: 400px !important;
+    width: 400px;
+    min-width: 300px;
+    max-width: 55vw;
+    resize: horizontal;
+    overflow: auto;
     border-top: none !important;
     border-bottom: none !important;
 }
@@ -604,6 +767,10 @@
 #rf-panel.rf-sidebar .rf-header {
     border-radius: 0 !important;
     cursor: default !important;
+}
+
+#rf-panel:not(.rf-sidebar) .rf-resize-handle {
+    display: none;
 }
 
 /* ── Distance tab ────────────────────────────────────────────────────────── */
@@ -825,19 +992,21 @@
 /* Overview stat blocks */
 .rf-sum-overview {
     display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 4px;
+    flex-wrap: nowrap;
 }
 
 .rf-sum-stat {
     flex: 1;
-    min-width: 52px;
+    min-width: 0;
     text-align: center;
     background: #1a1a1a;
     border-radius: 4px;
-    padding: 6px 4px;
+    padding: 4px 2px;
     border: 1px solid #2a2a2a;
 }
+.rf-sum-stat-click { cursor: pointer; }
+.rf-sum-stat-click:hover { border-color: var(--ACCENT, #00596b); background: #20272a; }
 
 .rf-sum-stat-mil { border-color: #7a3300; background: #1a0e06; }
 .rf-sum-stat-emg { border-color: #7a0000; background: #1a0606; animation: rf-emg-pulse 1.5s infinite; }
@@ -848,7 +1017,7 @@
 }
 
 .rf-sum-num {
-    font-size: 20px;
+    font-size: 14px;
     font-weight: bold;
     color: #fff;
     line-height: 1.1;
@@ -858,9 +1027,10 @@
 .rf-sum-stat-emg .rf-sum-num { color: #ff6666; }
 
 .rf-sum-label {
-    font-size: 10px;
+    font-size: 9px;
     color: #666;
-    margin-top: 2px;
+    margin-top: 1px;
+    letter-spacing: 0.2px;
 }
 
 /* Altitude distribution — horizontal bar chart */
@@ -1125,15 +1295,23 @@
 /* Summary scope segmented toggle (All aircraft | In map view) */
 .rf-sum-scope-wrap {
     display: flex;
-    gap: 0;
-    padding: 5px 6px 4px;
+    gap: 6px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 4px 3px;
     border-bottom: 1px solid #222;
+}
+.rf-sum-scope-btns {
+    display: flex;
+    gap: 0;
+    min-width: 0;
+    flex: 1;
 }
 
 .rf-sum-scope-btn {
-    flex: 1;
-    padding: 5px 8px;
-    font-size: 11px;
+    flex: 1 1 auto;
+    padding: 4px 6px;
+    font-size: 10px;
     font-weight: 600;
     border: 1px solid #333;
     background: #1a1a1a;
@@ -1143,12 +1321,30 @@
     letter-spacing: 0.2px;
 }
 
-.rf-sum-scope-btn:first-child {
+.rf-scope-home-btn {
+    flex: 0 0 28px;
+    font-size: 13px;
+    padding: 2px 0;
+    line-height: 1;
+}
+
+.rf-dist-mode-wrap {
+    display: flex;
+    gap: 0;
+    margin: 4px 0 2px;
+}
+.rf-dist-mode-note {
+    font-size: 10px;
+    color: #8aa;
+    margin: 2px 0 6px;
+}
+
+.rf-sum-scope-btns .rf-sum-scope-btn:first-child {
     border-radius: 4px 0 0 4px;
     border-right: none;
 }
 
-.rf-sum-scope-btn:last-child {
+.rf-sum-scope-btns .rf-sum-scope-btn:last-child {
     border-radius: 0 4px 4px 0;
 }
 
@@ -1161,6 +1357,99 @@
     background: var(--ACCENT, #00596b) !important;
     color: #fff !important;
     border-color: var(--ACCENT, #00596b) !important;
+}
+.rf-views-inline {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    flex: 0 0 auto;
+}
+.rf-views-select {
+    min-width: 110px;
+    max-width: 170px;
+    padding: 4px 6px;
+    border: 1px solid #333;
+    border-radius: 4px;
+    background: #1a1a1a;
+    color: #ccc;
+    font-size: 10px;
+}
+.rf-view-save-btn {
+    flex: 0 0 auto;
+    border-radius: 4px;
+    color: #cdefff;
+    border-color: #305f6b;
+}
+.rf-active-view-badge {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border: 1px solid #2f5d67;
+    border-radius: 12px;
+    background: rgba(0, 89, 107, 0.18);
+    max-width: 220px;
+}
+.rf-active-view-name {
+    font-size: 10px;
+    color: #dff7ff;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+}
+.rf-active-view-mode {
+    font-size: 9px;
+    color: #92d6e6;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.rf-view-item {
+    border: 1px solid #2e2e2e;
+    border-radius: 6px;
+    padding: 8px;
+    margin-top: 7px;
+    background: rgba(255,255,255,0.015);
+}
+.rf-view-item-active {
+    border-color: var(--ACCENT, #00596b);
+    background: rgba(0, 89, 107, 0.16);
+}
+.rf-view-item-name {
+    font-size: 12px;
+    color: #ddd;
+    font-weight: 600;
+}
+.rf-view-item-meta {
+    font-size: 10px;
+    color: #777;
+    margin-top: 2px;
+}
+.rf-view-item-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+.rf-view-map-cfg {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed #2f2f2f;
+}
+.rf-view-inline-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+    align-items: center;
+}
+.rf-view-map-cfg .rf-set-toggle {
+    margin: 0;
+}
+.rf-view-map-cfg .rf-set-toggle-label {
+    font-size: 11px;
 }
 
 /* "in view" badge shown in the Overview section title */
@@ -1663,4 +1952,39 @@
 }
 .rf-cat-btn.rf-cat-active .rf-cat-count {
     background: rgba(0,0,0,0.25);
+}
+
+.rf-scope-global {
+    padding: 6px 8px 4px;
+    border-bottom: 1px solid #2a2a2a;
+    background: #1a1a1a;
+}
+
+/* == Plane Alerts in Summary Attention section ============================= */
+.rf-sum-alert-badge {
+    display: inline-block;
+    background: #7b4a9e;
+    color: #fff;
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+.rf-sum-attn-hdr:hover .rf-sum-alert-badge {
+    background: #9b62c0;
+}
+.rf-sum-alert-tag {
+    display: inline-block;
+    background: rgba(123,74,158,0.18);
+    color: #c090e0;
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
 }

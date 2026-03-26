@@ -4,6 +4,8 @@ A multi-tab filter and dashboard panel for [tar1090](https://github.com/wiedehop
 
 Filters AND across tabs — a plane has to pass every active tab to stay on the map. Within a tab, multiple selected items are OR-ed.
 
+Active filters appear as **breadcrumb chips** below the tab bar so you can see at a glance what is applied, jump back to a tab by clicking the chip, or clear it with the X.
+
 ---
 
 ## Screenshots
@@ -79,6 +81,8 @@ Opens by default. A live dashboard of everything on screen — no filtering need
 
 **Range & coverage** — furthest aircraft from your receiver, with compass bearing and direction.
 
+**Recent Arrivals** — aircraft that first appeared on scope in the last 5 minutes, sorted newest first. Tracks all received aircraft regardless of map viewport so nothing is missed as you pan around.
+
 **Countries** — registration countries of aircraft on screen.
 
 All sections in Summary are clickable — click a row, a bar, or a header to filter the map to that group.
@@ -124,6 +128,27 @@ Military detection uses three methods in order:
 
 ---
 
+### Views
+
+Save your current filter state as a named preset and recall it in one click.
+
+**Saving a view** — set up any combination of filters across any tabs, then click **Save current as new view**. The view captures all active tab filters, the distance zones, and your panel scope.
+
+**Applying a view** — click the view name in the list, or use the quick-pick dropdown in the panel header next to the scope toggle.
+
+**Map behavior** — each view has optional map controls:
+- **Off** — apply filters only, leave the map position alone
+- **Dynamic** — after applying, auto-fit the map to show all matched aircraft. Updates live as the filtered set changes.
+- **Fixed** — snap the map to a saved lat/lon/zoom. Useful for monitoring a specific area.
+
+**Auto center / Auto zoom** — independent toggles within Dynamic mode. You can auto-zoom without auto-centering if you want to keep the current pan position.
+
+**Use current map** — captures the current tar1090 map position into a Fixed view.
+
+Views are saved to localStorage and survive browser restarts.
+
+---
+
 ### Alerts
 
 Fetches and caches [plane-alert-db](https://github.com/sdr-enthusiasts/plane-alert-db) from GitHub (once per 24 hours, stored in localStorage). This database covers thousands of aircraft of interest — military, government, charter operators, historic aircraft, and other notable registrations.
@@ -140,7 +165,12 @@ Define one or more filter zones by centre point and radius. Only aircraft within
 
 **Setting the centre point** — click anywhere on the embedded mini-map, or click "Use map centre" to use the current tar1090 map view position. Coordinates pre-populate from your receiver position when you first open the tab.
 
-**Multiple zones** — add as many zones as you want. Each one gets a different colour circle on the map. Active zones are listed at the top with remove buttons.
+**Multiple zones** — add as many zones as you want. Each one gets a different colour circle on both the mini-map and the main tar1090 map.
+
+**Filter mode** — three options:
+- **Inside** — show only aircraft inside at least one zone (default)
+- **Outside** — show only aircraft outside all zones
+- **Map only** — draw the zone circles on the map without filtering aircraft at all
 
 **Saved locations** — name and save frequently used positions. Click a saved location to instantly activate it as a zone.
 
@@ -157,10 +187,15 @@ When a distance filter is applied, the "only in map view" restriction is automat
 ### Settings
 
 - **Only aircraft in map view** — limits all lists to what's currently visible on screen. On by default.
+- **Hide "All aircraft" scope** — removes the All option from the scope toggle so the panel always starts in In map view mode.
 - **Display mode** — sidebar (sits next to tar1090's own info panel) or popup (floating).
+- **Sidebar side** — dock the panel to the left or right of the screen.
+- **Home position** — override the map position that RF recenters to when the panel first opens. Set a custom lat/lon and zoom, or click "Use current map" to capture the current view.
+- **Route lookups for known airline prefixes only** — when enabled, VRS route data is only fetched for airlines already in the local airline database. Reduces unnecessary network requests.
 - **Use local databases** — downloads OurAirports and VRS Standing Data once per 24 hours. Cached in localStorage. On by default.
 - **Visible tabs** — hide any tab you don't use. Hidden tabs keep their filter state.
 - **Section visibility** — the Summary tab sections can each be toggled on/off to keep it tidy.
+- **Backup & Restore** — export all RF settings (home, distance zones, saved views, tab visibility, summary config) to a JSON file. Import it back at any time. Useful when moving to a new browser or device.
 
 ---
 

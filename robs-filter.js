@@ -93,6 +93,7 @@
         countries:     true,   // Countries visible (from registration prefix)
         slowest:       true,   // Slowest airborne aircraft (> 30 kt)
     };
+    var _sumAttentionSort = { by: 'distance', dir: 'asc' };
 
     // Runtime panel scope used by all tabs (does not clear filters):
     //  - all:      all aircraft currently received
@@ -1297,6 +1298,7 @@
             '<select class="rf-views-select rf-views-select-compact" onchange="window._rfViewsQuickPick(this.value)">' + opt + '</select>' +
             '<div class="rf-view-quick-actions">' +
             '<button class="rf-cat-btn" onclick="window._rfViewsApplyQuick()">Apply</button>' +
+            '<button class="rf-cat-btn" onclick="window._rfViewsClearActive()">Turn Off</button>' +
             '<button class="rf-cat-btn" onclick="window._rfViewsSavePrompt()">Save Current</button>' +
             '<button class="rf-cat-btn" onclick="window._rfSwitchTab(\'views\');window._rfToggleViewQuickMenu(false)">Manage</button>' +
             '</div>';
@@ -1432,6 +1434,20 @@
                 '<span class="rf-chip-label">Summary</span>' +
                 '<span class="rf-chip-items">' + sfLabel.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>' +
                 '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfClearSumFilter()">&#x2715;</button>' +
+                '</div>'
+            );
+        }
+
+        // Active View chip (easy off switch)
+        var avc = _rfGetActiveView();
+        if (avc) {
+            _rfEnsureViewShape(avc);
+            var avMode = !avc.map.enabled ? 'Map Off' : (avc.map.mode === 'fixed' ? 'Map Fixed' : 'Map Dynamic');
+            chips.push(
+                '<div class="rf-chip rf-chip-active" onclick="window._rfSwitchTab(\'views\')" title="Active view. Click to open Views tab">' +
+                '<span class="rf-chip-label">View</span>' +
+                '<span class="rf-chip-items">' + _rfEscText(avc.name || 'Unnamed') + ' • ' + avMode + '</span>' +
+                '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfViewsClearActive()">&#x2715;</button>' +
                 '</div>'
             );
         }
@@ -1833,9 +1849,16 @@
         } catch (e) {}
 
         var closestPlanes = [];
+        function hasLivePosition(q) {
+            if (!q) return false;
+            if (q.position && q.position.length >= 2 && !isNaN(+q.position[0]) && !isNaN(+q.position[1])) return true;
+            if (!isNaN(+q.lat) && !isNaN(+q.lon)) return true;
+            return false;
+        }
 
         for (var i = 0; i < planes.length; i++) {
             var p = planes[i];
+            var pHasPos = hasLivePosition(p);
 
             // Altitude — tar1090 uses plane.altitude ('ground' string or number)
             var isGround = p.altitude === 'ground' || p.alt_baro === 'ground';
@@ -1857,10 +1880,10 @@
             if (isGround && p.icao) onGroundIcaos.push(p.icao.toUpperCase());
 
             // Military
-            if (isMilitaryAircraft(p)) militaryList.push(p);
+            if (pHasPos && isMilitaryAircraft(p)) militaryList.push(p);
 
             // Emergency squawks
-            if (p.squawk === '7500' || p.squawk === '7600' || p.squawk === '7700') emergencyList.push(p);
+            if (pHasPos && (p.squawk === '7500' || p.squawk === '7600' || p.squawk === '7700')) emergencyList.push(p);
 
             // Unusual: very low fixed-wing (not helicopter, not ground)
             if (!isGround && altNum !== null && altNum > 0 && altNum < 1000 &&
@@ -1899,12 +1922,12 @@
             if (tCode) typeCounts[tCode] = (typeCounts[tCode] || 0) + 1;
 
             // Speed leaders / slowest — ground speed (gs), airborne only
-            if (!isGround && typeof p.gs === 'number' && p.gs > 0) speedList.push(p);
+            if (pHasPos && !isGround && typeof p.gs === 'number' && p.gs > 0) speedList.push(p);
             // Slowest: airborne and actually moving (gs > 30 kt excludes parked/taxiing)
-            if (!isGround && typeof p.gs === 'number' && p.gs > 30) slowestList.push(p);
+            if (pHasPos && !isGround && typeof p.gs === 'number' && p.gs > 30) slowestList.push(p);
 
             // High flyers
-            if (!isGround && typeof altNum === 'number' && altNum > 0) highList.push(p);
+            if (pHasPos && !isGround && typeof altNum === 'number' && altNum > 0) highList.push(p);
 
             // Tracking method
             var at = (p.addrtype || '').toLowerCase();
@@ -1966,7 +1989,7 @@
             }
             _alertsDb.forEach(function(a) {
                 var lp = _aLiveMap[(a.icao || '').toUpperCase()];
-                if (lp) alertsList.push({ plane: lp, alert: a });
+                if (lp && hasLivePosition(lp)) alertsList.push({ plane: lp, alert: a });
             });
         }
 
@@ -1986,12 +2009,17 @@
             distList.sort(function(a, b) { return b.dist - a.dist; });
             furthestItem = distList[0];
         }
+        var distByIcao = {};
+        for (var dsi = 0; dsi < distList.length; dsi++) {
+            var dp = distList[dsi];
+            if (dp && dp.plane && dp.plane.icao) distByIcao[String(dp.plane.icao).toUpperCase()] = dp.dist;
+        }
 
         // Recent arrivals: first seen within last 5 minutes, sorted newest first
         var ARRIVAL_WINDOW_MS = 5 * 60 * 1000;
         var recentArrivals = planes.filter(function(p) {
             var fs = _sumArrivals[p.icao];
-            return fs && (nowMs - fs) < ARRIVAL_WINDOW_MS;
+            return fs && (nowMs - fs) < ARRIVAL_WINDOW_MS && hasLivePosition(p);
         }).sort(function(a, b) {
             return (_sumArrivals[b.icao] || 0) - (_sumArrivals[a.icao] || 0);
         }).slice(0, 8);
@@ -2024,6 +2052,71 @@
                 ' <span class="rf-sum-altbadge">' + altStr(q) + '</span>' +
                 (typeof q.gs === 'number' ? ' <span class="rf-sum-speed">' + Math.round(q.gs) + '\u2009kt</span>' : '') +
                 '</div>';
+        }
+        function planeDistNm(q) {
+            if (!q || !q.icao) return null;
+            var d = distByIcao[String(q.icao).toUpperCase()];
+            return (typeof d === 'number' && !isNaN(d)) ? d : null;
+        }
+        // Build one reference scale for all Attention rows in this render.
+        var _attnDistVals = [];
+        emergencyList.forEach(function(q){ var d = planeDistNm(q); if (d !== null) _attnDistVals.push(d); });
+        militaryList.forEach(function(q){ var d = planeDistNm(q); if (d !== null) _attnDistVals.push(d); });
+        unusualList.forEach(function(i){ var d = planeDistNm(i && i.plane); if (d !== null) _attnDistVals.push(d); });
+        alertsList.forEach(function(i){ var d = planeDistNm(i && i.plane); if (d !== null) _attnDistVals.push(d); });
+        var _attnDistMin = null, _attnDistMax = null;
+        if (_attnDistVals.length > 0) {
+            _attnDistMin = Math.min.apply(null, _attnDistVals);
+            _attnDistMax = Math.max.apply(null, _attnDistVals);
+        }
+        function attnProximityPct(dNm) {
+            if (dNm === null || _attnDistMin === null || _attnDistMax === null) return 0;
+            if (_attnDistMax <= _attnDistMin) return 100;
+            // 100 = closest in current attention set, 0 = farthest.
+            var p = 100 * (_attnDistMax - dNm) / (_attnDistMax - _attnDistMin);
+            if (p < 0) p = 0;
+            if (p > 100) p = 100;
+            return Math.round(p);
+        }
+        function attnRow(q, leadHtml) {
+            var d = planeDistNm(q);
+            var dTxt = d === null ? '\u2014' : d.toFixed(0) + '\u2009nm';
+            var prox = attnProximityPct(d);
+            var barTitle = d === null
+                ? 'No position/distance available'
+                : ('Proximity in current Attention set: ' + prox + '% (nearer = higher)');
+            return planeRow(q,
+                leadHtml +
+                ' <span class="rf-sum-attn-dist">' + dTxt + '</span>' +
+                ' <span class="rf-sum-attn-distline" title="' + barTitle + '">' +
+                    '<span class="rf-sum-attn-distfill" style="width:' + prox + '%"></span>' +
+                '</span>'
+            );
+        }
+        function sortPlanesForAttention(arr) {
+            var by = _sumAttentionSort.by || 'distance';
+            var dir = _sumAttentionSort.dir === 'desc' ? -1 : 1;
+            var cp = arr.slice();
+            cp.sort(function(a, b) {
+                var av, bv;
+                if (by === 'name') {
+                    av = (a.flight || a.name || a.icao || '').toString();
+                    bv = (b.flight || b.name || b.icao || '').toString();
+                    return av.localeCompare(bv) * dir;
+                } else if (by === 'altitude') {
+                    av = altNum2(a); bv = altNum2(b);
+                } else if (by === 'speed') {
+                    av = (typeof a.gs === 'number' ? a.gs : -1);
+                    bv = (typeof b.gs === 'number' ? b.gs : -1);
+                } else {
+                    av = planeDistNm(a); bv = planeDistNm(b);
+                    av = (av === null ? 999999 : av);
+                    bv = (bv === null ? 999999 : bv);
+                }
+                if (av === bv) return 0;
+                return (av < bv ? -1 : 1) * dir;
+            });
+            return cp;
         }
 
         var html = '<div class="rf-summary-content">';
@@ -2109,29 +2202,39 @@
             var hasAttn = emergencyList.length > 0 || unusualList.length > 0 || militaryList.length > 0 || _alertsDb || _alertsFetching || _alertsError;
             html += '<div class="rf-sum-section">';
             html += '<div class="rf-sum-title">Attention</div>';
+            html += '<div class="rf-sum-attn-sort-wrap">' +
+                '<span class="rf-sum-attn-sort-label">Sort:</span>' +
+                '<button class="rf-cat-btn' + (_sumAttentionSort.by === 'distance' ? ' rf-cat-active' : '') + '" onclick="window._rfSetAttentionSort(\'distance\')">Distance</button>' +
+                '<button class="rf-cat-btn' + (_sumAttentionSort.by === 'altitude' ? ' rf-cat-active' : '') + '" onclick="window._rfSetAttentionSort(\'altitude\')">Altitude</button>' +
+                '<button class="rf-cat-btn' + (_sumAttentionSort.by === 'speed' ? ' rf-cat-active' : '') + '" onclick="window._rfSetAttentionSort(\'speed\')">Speed</button>' +
+                '<button class="rf-cat-btn' + (_sumAttentionSort.by === 'name' ? ' rf-cat-active' : '') + '" onclick="window._rfSetAttentionSort(\'name\')">Name</button>' +
+                '<button class="rf-cat-btn" onclick="window._rfToggleAttentionSortDir()" title="Toggle sort direction">' + (_sumAttentionSort.dir === 'asc' ? '&#9650;' : '&#9660;') + '</button>' +
+                '</div>';
             if (!hasAttn) {
                 html += '<div class="rf-sum-none">Nothing unusual right now.</div>';
             } else {
                 // Emergency squawks — clickable header filters all emergency planes
                 if (emergencyList.length > 0) {
                     var emgIdx = _sumClickData.push(emergencyList.map(function(q){ return q.icao; })) - 1;
+                    var emgSorted = sortPlanesForAttention(emergencyList);
                     html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterIdx(' + emgIdx + ')" title="Click to filter all emergency aircraft">' +
                         '<span class="rf-sum-squawk-hdr">&#9888; Emergency (' + emergencyList.length + ')</span>' +
                         '</div>';
-                    emergencyList.forEach(function (q) {
+                    emgSorted.forEach(function (q) {
                         var sq   = q.squawk;
                         var desc = sq === '7500' ? 'Hijack' : sq === '7600' ? 'Radio fail' : 'Emergency';
-                        html += planeRow(q, '<span class="rf-sum-squawk">SQWK\u00a0' + sq + ' ' + desc + '</span>');
+                        html += attnRow(q, '<span class="rf-sum-squawk">SQWK\u00a0' + sq + ' ' + desc + '</span>');
                     });
                 }
                 // Military — clickable header filters all military planes
                 if (militaryList.length > 0) {
                     var milIdx = _sumClickData.push(militaryList.map(function(q){ return q.icao; })) - 1;
+                    var milSorted = sortPlanesForAttention(militaryList);
                     html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterIdx(' + milIdx + ')" title="Click to filter all military aircraft">' +
                         '<span class="rf-sum-mil-badge">MIL (' + militaryList.length + ')</span>' +
                         '</div>';
-                    militaryList.slice(0, 8).forEach(function (q) {
-                        html += planeRow(q, '<span class="rf-sum-mil-badge">MIL</span>');
+                    milSorted.slice(0, 8).forEach(function (q) {
+                        html += attnRow(q, '<span class="rf-sum-mil-badge">MIL</span>');
                     });
                     if (militaryList.length > 8) {
                         html += '<div class="rf-sum-more">and ' + (militaryList.length - 8) + ' more \u2014 <span class="rf-sum-link" onclick="window._rfSumFilterIdx(' + milIdx + ')">filter all</span></div>';
@@ -2140,11 +2243,16 @@
                 // Very low aircraft
                 if (unusualList.length > 0) {
                     var lowIdx = _sumClickData.push(unusualList.map(function(i){ return i.plane.icao; })) - 1;
+                    var lowSorted = unusualList.slice().sort(function(a, b) {
+                        var ap = a.plane, bp = b.plane;
+                        var sa = sortPlanesForAttention([ap, bp]);
+                        return sa[0] === ap ? -1 : 1;
+                    });
                     html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterIdx(' + lowIdx + ')" title="Click to filter all low-altitude aircraft">' +
                         '<span class="rf-sum-low-badge">LOW (' + unusualList.length + ')</span>' +
                         '</div>';
-                    unusualList.slice(0, 4).forEach(function (item) {
-                        html += planeRow(item.plane, '<span class="rf-sum-low-badge">LOW</span> <span class="rf-sum-attn-desc">' + esc(item.reason) + '</span>');
+                    lowSorted.slice(0, 6).forEach(function (item) {
+                        html += attnRow(item.plane, '<span class="rf-sum-low-badge">LOW</span> <span class="rf-sum-attn-desc">' + esc(item.reason) + '</span>');
                     });
                 }
                 // Plane alert DB status/matches (always shown so visibility is obvious)
@@ -2156,13 +2264,17 @@
                 } else if (_alertsDb) {
                     if (alertsList.length > 0) {
                         var alIdx = _sumClickData.push(alertsList.map(function(x){ return x.plane.icao; })) - 1;
+                        var alSorted = alertsList.slice().sort(function(a, b) {
+                            var sa = sortPlanesForAttention([a.plane, b.plane]);
+                            return sa[0] === a.plane ? -1 : 1;
+                        });
                         html += '<div class="rf-sum-attn-hdr" onclick="window._rfSumFilterIdx(' + alIdx + ')" title="Click to filter all alert-matched aircraft">' +
                             '<span class="rf-sum-alert-badge">\u2605 Alerts (' + alertsList.length + ')</span>' +
                             '</div>';
-                        alertsList.slice(0, 6).forEach(function(item) {
+                        alSorted.slice(0, 6).forEach(function(item) {
                             var tags = [item.alert.tag1, item.alert.tag2, item.alert.tag3].filter(Boolean).join(' \u00b7 ');
                             var label = tags || item.alert.category || item.alert.cmpg || 'Alert';
-                            html += planeRow(item.plane, '<span class="rf-sum-alert-tag">' + esc(label) + '</span>');
+                            html += attnRow(item.plane, '<span class="rf-sum-alert-tag">' + esc(label) + '</span>');
                         });
                         if (alertsList.length > 6) {
                             html += '<div class="rf-sum-more">and ' + (alertsList.length - 6) + ' more \u2014 <span class="rf-sum-link" onclick="window._rfSumFilterIdx(' + alIdx + ')">filter all</span></div>';
@@ -4240,6 +4352,15 @@
         window._rfViewsDelete(_activeViewId);
     };
 
+    window._rfViewsClearActive = function () {
+        _activeViewId = '';
+        _rfQuickSelectedViewId = '';
+        _rfRenderScopeHeader();
+        applyFilter();
+        if (state.panelOpen) buildPanel();
+        window._rfToggleViewQuickMenu(false);
+    };
+
     window._rfViewsSetMapEnabled = function (id, on) {
         var v = _rfFindViewById(id);
         if (!v) return;
@@ -4323,6 +4444,15 @@
         _summarySettings[section] = !!on;
         try { localStorage.setItem(SUMMARY_SETTINGS_KEY, JSON.stringify(_summarySettings)); } catch (e) {}
         _rfSavePersistBackup();
+        if (state.activeTab === 'summary') buildPanel();
+    };
+    window._rfSetAttentionSort = function (by) {
+        if (['distance', 'altitude', 'speed', 'name'].indexOf(by) === -1) return;
+        _sumAttentionSort.by = by;
+        if (state.activeTab === 'summary') buildPanel();
+    };
+    window._rfToggleAttentionSortDir = function () {
+        _sumAttentionSort.dir = (_sumAttentionSort.dir === 'asc') ? 'desc' : 'asc';
         if (state.activeTab === 'summary') buildPanel();
     };
 

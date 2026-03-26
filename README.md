@@ -4,11 +4,13 @@ A multi-tab filter and dashboard panel for [tar1090](https://github.com/wiedehop
 
 Filters AND across tabs — a plane has to pass every active tab to stay on the map. Within a tab, multiple selected items are OR-ed.
 
-Active filters appear as **breadcrumb chips** below the tab bar so you can see at a glance what is applied, jump back to a tab by clicking the chip, or clear it with the X.
+Active filters appear as **breadcrumb chips** below the tab bar so you can see at a glance what is applied, jump back to a tab by clicking the chip, or clear it with the X. When a saved View is active it also appears as a chip showing the view name and map mode, with a one-click Turn Off button.
 
 ---
 
 ## Screenshots
+
+![Full panel overview](Screenshots/Full-Page.png)
 
 | Summary | Aircraft |
 |---|---|
@@ -62,6 +64,10 @@ Opens by default. A live dashboard of everything on screen — no filtering need
 - Emergency squawks (7500/7600/7700) with code descriptions
 - Military aircraft — click the header to filter all military on the map
 - Low altitude airborne aircraft that look unusual
+
+Each row in Attention shows the aircraft's distance from your receiver in nautical miles, plus a proximity bar scaled relative to the other aircraft in the current Attention set so the nearest aircraft always has a full bar.
+
+Sort the Attention list by **Distance / Altitude / Speed / Name** with an ascending/descending toggle. Only aircraft with a live position are included.
 
 **Closest aircraft** — top 5 nearest to your receiver, with distance in nautical miles.
 
@@ -134,7 +140,7 @@ Save your current filter state as a named preset and recall it in one click.
 
 **Saving a view** — set up any combination of filters across any tabs, then click **Save current as new view**. The view captures all active tab filters, the distance zones, and your panel scope.
 
-**Applying a view** — click the view name in the list, or use the quick-pick dropdown in the panel header next to the scope toggle.
+**Applying a view** — click the view name in the list, or use the quick-pick dropdown in the panel header next to the scope toggle. While a view is active, a chip appears in the breadcrumb bar showing the view name and map mode. Click the X on the chip or the **Turn Off** button in the dropdown to deactivate the view without clearing the underlying filters.
 
 **Map behavior** — each view has optional map controls:
 - **Off** — apply filters only, leave the map position alone

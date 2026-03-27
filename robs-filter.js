@@ -71,7 +71,7 @@
     var VIEWS_KEY      = 'rf_views_v1';
     var PERSIST_COOKIE_KEY = 'rf_persist_v1';
     var HOME_COOKIE_KEY = 'rf_home_cookie_v1';
-    var _tabVisibility = { summary: true, airports: true, countries: true, operators: true, aircraft: true, views: true, alerts: true, distance: true };
+    var _tabVisibility = { summary: true, airports: true, countries: true, operators: true, aircraft: true, views: true, alerts: true, distance: true, ranges: true, watchlist: true };
     var _savedViews = [];
     var _activeViewId = '';
     var _activeViewIds = [];
@@ -167,6 +167,51 @@
     // Per-render indexed click data for Alerts tab (avoids fragile inline quoting).
     var _alertsClickData      = [];
 
+    // ── Ranges filter state ───────────────────────────────────────────────────
+    var RANGES_KEY = 'rf_ranges_v1';
+    var _rangesFilter = {
+        speedMin: '', speedMax: '',
+        altMin: '', altMax: '',
+        vrMin: '', vrMax: '',
+        squawk: '',
+        ageMin: '', ageMax: '',
+        callsign: ''
+    };
+
+    // ── Watch list state ──────────────────────────────────────────────────────
+    var WATCHLIST_KEY = 'rf_watchlist_v1';
+    var _watchList = [];  // [{icao, label, added}]
+    var _watchlistMapFilter = false;
+
+    // ── Notification state ────────────────────────────────────────────────────
+    var NOTIF_KEY = 'rf_notif_v1';
+    var _notifSettings = {
+        enabled: false,
+        military: true,
+        emergency: true,
+        watchlist: true,
+        customRange: false,
+        customRangeNm: 20,
+        newAircraft: false
+    };
+    var _notifSeen = {};  // {icao_condition: lastNotifMs}
+    var _notifLastCheck = 0;
+
+    // ── Session records state ─────────────────────────────────────────────────
+    var RECORDS_KEY = 'rf_records_v1';
+    var _sessionRecords = {
+        maxAircraft: { val: 0, date: '' },
+        maxMilitary: { val: 0, date: '' },
+        maxRange:    { val: 0, icao: '', callsign: '', date: '' },
+        maxAltitude: { val: 0, icao: '', callsign: '', date: '' },
+        maxSpeed:    { val: 0, icao: '', callsign: '', date: '' }
+    };
+    var _sessionStats = { aircraft: 0, military: 0, range: 0 };
+
+    // ── Heatmap state ─────────────────────────────────────────────────────────
+    var _rfHeatmapEnabled = false;
+    var _rfHeatmapLayer = null;
+
     // ── Distance filter state ─────────────────────────────────────────────────
     var _distMap = null;          // Leaflet map instance (mini-map in panel)
     var _distMapMarker = null;    // centre point marker on mini-map
@@ -204,6 +249,12 @@
 
     // Shorthand helpers
     function ts()             { return state.tabState[state.activeTab]; }
+    function _rfRangesFilterActive() {
+        var f = _rangesFilter;
+        return !!(f.speedMin || f.speedMax || f.altMin || f.altMax ||
+                  f.vrMin || f.vrMax || f.squawk || f.ageMin || f.ageMax || f.callsign);
+    }
+
     function isFilterActive() {
         var ac = state.tabState.aircraft;
         if (ac.catFilter.size > 0 || ac.regCountryFilter !== '') return true;
@@ -211,6 +262,8 @@
         if (_alertsMapFilter && _alertsMapFilterIcaos) return true;
         if (_distanceZones.length > 0 && _distanceMode !== 'maponly') return true;
         if (_sumFilter.size > 0) return true;
+        if (_rfRangesFilterActive()) return true;
+        if (_watchlistMapFilter) return true;
         return Object.values(state.tabState).some(function(s) { return s.items.size > 0; });
     }
 
@@ -900,6 +953,95 @@
         return null;
     }
 
+    function _rfMatchSquawk(planeSquawk, filterStr) {
+        if (!filterStr || !planeSquawk) return true;
+        var f = filterStr.trim();
+        if (!f) return true;
+        var parts = f.split(',');
+        for (var pi = 0; pi < parts.length; pi++) {
+            var part = parts[pi].trim();
+            if (!part) continue;
+            if (part.indexOf('-') > 0) {
+                var bounds = part.split('-');
+                var lo = parseInt(bounds[0].trim(), 10);
+                var hi = parseInt(bounds[1].trim(), 10);
+                var sq = parseInt(planeSquawk, 10);
+                if (!isNaN(lo) && !isNaN(hi) && !isNaN(sq) && sq >= lo && sq <= hi) return true;
+            } else {
+                if (planeSquawk === part) return true;
+            }
+        }
+        return false;
+    }
+
+    function planePassesRangesFilter(plane) {
+        var f = _rangesFilter;
+        // Speed
+        if (f.speedMin !== '' && typeof plane.gs === 'number') {
+            if (plane.gs < parseFloat(f.speedMin)) return false;
+        }
+        if (f.speedMax !== '' && typeof plane.gs === 'number') {
+            if (plane.gs > parseFloat(f.speedMax)) return false;
+        }
+        // Altitude
+        var altVal = null;
+        if (plane.altitude === 'ground' || plane.alt_baro === 'ground') altVal = 0;
+        else if (typeof plane.altitude === 'number') altVal = plane.altitude;
+        else if (typeof plane.alt_baro === 'number') altVal = plane.alt_baro;
+        if (f.altMin !== '' && altVal !== null) {
+            if (altVal < parseFloat(f.altMin)) return false;
+        }
+        if (f.altMax !== '' && altVal !== null) {
+            if (altVal > parseFloat(f.altMax)) return false;
+        }
+        // Vertical rate
+        var vrVal = typeof plane.geom_rate === 'number' ? plane.geom_rate :
+                    (typeof plane.baro_rate === 'number' ? plane.baro_rate : null);
+        if (f.vrMin !== '' && vrVal !== null) {
+            if (vrVal < parseFloat(f.vrMin)) return false;
+        }
+        if (f.vrMax !== '' && vrVal !== null) {
+            if (vrVal > parseFloat(f.vrMax)) return false;
+        }
+        // Squawk
+        if (f.squawk !== '') {
+            if (!_rfMatchSquawk(plane.squawk, f.squawk)) return false;
+        }
+        // Age on scope
+        if (f.ageMin !== '' || f.ageMax !== '') {
+            var firstSeen = plane.icao ? _sumArrivals[plane.icao] : null;
+            if (firstSeen) {
+                var ageMins = (Date.now() - firstSeen) / 60000;
+                if (f.ageMin !== '' && ageMins < parseFloat(f.ageMin)) return false;
+                if (f.ageMax !== '' && ageMins > parseFloat(f.ageMax)) return false;
+            }
+        }
+        // Callsign / ICAO search
+        if (f.callsign !== '') {
+            var pattern = f.callsign.trim().toLowerCase();
+            var cs = ((plane.flight || plane.name || '') + '').toLowerCase();
+            var ic = ((plane.icao || '') + '').toLowerCase();
+            if (pattern.indexOf('*') >= 0) {
+                // Wildcard matching: convert * to regex .*
+                var regStr = '^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$';
+                var re = new RegExp(regStr);
+                if (!re.test(cs) && !re.test(ic)) return false;
+            } else {
+                if (cs.indexOf(pattern) < 0 && ic.indexOf(pattern) < 0) return false;
+            }
+        }
+        return true;
+    }
+
+    function planePassesWatchlistFilter(plane) {
+        if (!_watchlistMapFilter) return true;
+        var icao = (plane.icao || '').toUpperCase();
+        for (var wi = 0; wi < _watchList.length; wi++) {
+            if ((_watchList[wi].icao || '').toUpperCase() === icao) return true;
+        }
+        return false;
+    }
+
     function planePassesDistanceFilter(plane) {
         if (_distanceZones.length === 0) return true;
         if (_distanceMode === 'maponly') return true;
@@ -956,6 +1098,10 @@
         }
         // Distance filter
         if (excludeTab !== 'distance' && !planePassesDistanceFilter(plane)) return false;
+        // Ranges filter
+        if (excludeTab !== 'ranges' && !planePassesRangesFilter(plane)) return false;
+        // Watchlist map filter
+        if (excludeTab !== 'watchlist' && !planePassesWatchlistFilter(plane)) return false;
         // Summary quick-filter
         if (_sumFilter.size > 0) {
             var si = plane.icao ? plane.icao.toUpperCase() : '';
@@ -1133,6 +1279,10 @@
             summary: {
                 sumFilter: Array.from(_sumFilter || []),
             },
+            ranges: JSON.parse(JSON.stringify(_rangesFilter)),
+            watchlist: {
+                mapFilter: !!_watchlistMapFilter
+            },
             map: _rfDefaultViewMap(),
         };
     }
@@ -1167,6 +1317,16 @@
         _sumFilter.clear();
         var sf = vs.summary && Array.isArray(vs.summary.sumFilter) ? vs.summary.sumFilter : [];
         sf.forEach(function(ic) { _sumFilter.add(String(ic || '').toUpperCase()); });
+
+        if (vs.ranges && typeof vs.ranges === 'object') {
+            var rk = Object.keys(_rangesFilter);
+            for (var ri = 0; ri < rk.length; ri++) {
+                if (typeof vs.ranges[rk[ri]] !== 'undefined') _rangesFilter[rk[ri]] = String(vs.ranges[rk[ri]]);
+            }
+        }
+        if (vs.watchlist && typeof vs.watchlist === 'object') {
+            _watchlistMapFilter = !!vs.watchlist.mapFilter;
+        }
         return true;
     }
 
@@ -1341,6 +1501,8 @@
             'onclick="window._rfSetPanelScope(\'inview\')" title="Only aircraft visible in the current map viewport">In map view</button>');
         btns.push('<button class="rf-sum-scope-btn' + (_panelScope === 'filtered' ? ' rf-sum-scope-active' : '') + '" ' +
             'onclick="window._rfSetPanelScope(\'filtered\')" title="Only aircraft matching active filters">Filtered view</button>');
+        btns.push('<button class="rf-sum-scope-btn' + (_rfHeatmapEnabled ? ' rf-sum-scope-active' : '') + '" ' +
+            'onclick="window._rfToggleHeatmap()" title="Toggle heatmap overlay on main map">Heatmap</button>');
         return '<div class="rf-sum-scope-wrap">' +
             '<div class="rf-sum-scope-btns">' + btns.join('') + '</div>' +
         '</div>';
@@ -1525,6 +1687,33 @@
                 '<span class="rf-chip-label">Distance</span>' +
                 '<span class="rf-chip-items">' + distSummary.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>' +
                 '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfDistClear()">&#x2715;</button>' +
+                '</div>'
+            );
+        }
+
+        // Ranges filter chip
+        if (_rfRangesFilterActive()) {
+            var rngActive = state.activeTab === 'ranges' ? ' rf-chip-active' : '';
+            var rngCount = 0;
+            var rk2 = Object.keys(_rangesFilter);
+            for (var ri2 = 0; ri2 < rk2.length; ri2++) { if (_rangesFilter[rk2[ri2]]) rngCount++; }
+            chips.push(
+                '<div class="rf-chip' + rngActive + '" onclick="window._rfSwitchTab(\'ranges\')" title="Click to open Ranges tab">' +
+                '<span class="rf-chip-label">Ranges</span>' +
+                '<span class="rf-chip-items">' + rngCount + ' filter' + (rngCount !== 1 ? 's' : '') + ' active</span>' +
+                '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfClearRanges()">&#x2715;</button>' +
+                '</div>'
+            );
+        }
+
+        // Watchlist map filter chip
+        if (_watchlistMapFilter) {
+            var wlActive = state.activeTab === 'watchlist' ? ' rf-chip-active' : '';
+            chips.push(
+                '<div class="rf-chip' + wlActive + '" onclick="window._rfSwitchTab(\'watchlist\')" title="Click to open Watchlist tab">' +
+                '<span class="rf-chip-label">Watchlist</span>' +
+                '<span class="rf-chip-items">Map filter ON (' + _watchList.length + ')</span>' +
+                '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfWatchlistToggleMapFilter()">&#x2715;</button>' +
                 '</div>'
             );
         }
@@ -2174,16 +2363,27 @@
             if (p > 100) p = 100;
             return Math.round(p);
         }
+        function attnTimeStr(q) {
+            var fs = q.icao ? _sumArrivals[q.icao] : null;
+            if (!fs) return '';
+            var secs = Math.round((nowMs - fs) / 1000);
+            if (secs < 60) return secs + 's';
+            var mins = Math.floor(secs / 60);
+            if (mins < 60) return mins + 'm';
+            return Math.floor(mins / 60) + 'h\u00a0' + (mins % 60) + 'm';
+        }
         function attnRow(q, leadHtml) {
             var d = planeDistNm(q);
             var dTxt = d === null ? '\u2014' : d.toFixed(0) + '\u2009nm';
             var prox = attnProximityPct(d);
+            var timeTxt = attnTimeStr(q);
             var barTitle = d === null
                 ? 'No position/distance available'
                 : ('Proximity in current Attention set: ' + prox + '% (nearer = higher)');
             return planeRow(q,
                 leadHtml +
                 ' <span class="rf-sum-attn-dist">' + dTxt + '</span>' +
+                (timeTxt ? ' <span class="rf-sum-attn-time">' + timeTxt + '</span>' : '') +
                 ' <span class="rf-sum-attn-distline" title="' + barTitle + '">' +
                     '<span class="rf-sum-attn-distfill" style="width:' + prox + '%"></span>' +
                 '</span>'
@@ -2613,10 +2813,71 @@
             html += '</div>';
         }
 
+        // ── Vertical rate leaders ─────────────────────────────────────────────────
+        var vrList = [];
+        for (var vri = 0; vri < planes.length; vri++) {
+            var vrp = planes[vri];
+            var vrv = typeof vrp.geom_rate === 'number' ? vrp.geom_rate : (typeof vrp.baro_rate === 'number' ? vrp.baro_rate : null);
+            if (vrv !== null && hasLivePosition(vrp)) vrList.push({ plane: vrp, vr: vrv });
+        }
+        vrList.sort(function(a, b) { return b.vr - a.vr; });
+        var climbTop = vrList.filter(function(x) { return x.vr > 0; }).slice(0, 5);
+        var descentTop = vrList.filter(function(x) { return x.vr < 0; }).sort(function(a, b) { return a.vr - b.vr; }).slice(0, 5);
+        if (climbTop.length > 0 || descentTop.length > 0) {
+            html += '<div class="rf-sum-section">';
+            html += '<div class="rf-sum-title">Vertical Rate Leaders</div>';
+            html += '<div class="rf-vr-leaders">';
+            function vrLeaderList(items, title, color) {
+                if (!items.length) return '';
+                var h = '<div class="rf-vr-col"><div class="rf-vr-col-title">' + title + '</div>';
+                items.forEach(function(x) {
+                    var ic = (x.plane.icao || '').toUpperCase();
+                    var sel = _sumFilter.size > 0 && _sumFilter.has(ic);
+                    h += '<div class="rf-sum-plane-row' + (sel ? ' rf-sum-plane-sel' : '') + '" onclick="window._rfSumFilterIcao(\'' + ic + '\')">' +
+                        '<span style="color:' + color + ';font-size:10px;font-weight:700">' + (x.vr > 0 ? '+' : '') + Math.round(x.vr) + '\u2009fpm</span>' +
+                        ' <span class="rf-sum-aname">' + esc(x.plane.flight || x.plane.name || x.plane.icao || '?') + '</span>' +
+                        ' <span class="rf-sum-type">' + esc(x.plane.icaoType || x.plane.typeLong || '') + '</span>' +
+                        '</div>';
+                });
+                h += '</div>';
+                return h;
+            }
+            html += vrLeaderList(climbTop, 'Climbing', '#4CAF50');
+            html += vrLeaderList(descentTop, 'Descending', '#e87c7c');
+            html += '</div>';
+            html += '</div>';
+        }
+
+        // ── Session records ────────────────────────────────────────────────────────
+        _rfUpdateSessionRecords(planes);
+        html += '<div class="rf-sum-section">';
+        html += '<div class="rf-sum-title">Session Records</div>';
+        html += '<div class="rf-records-grid">';
+        function recRow(label, rec, unit, extra) {
+            if (!rec.val) return '';
+            return '<div class="rf-rec-row">' +
+                '<span class="rf-rec-label">' + label + '</span>' +
+                '<span class="rf-rec-val">' + rec.val.toLocaleString() + '\u2009' + unit + '</span>' +
+                (extra ? '<span class="rf-rec-extra">' + extra + '</span>' : '') +
+                (rec.date ? '<span class="rf-rec-date">' + rec.date + '</span>' : '') +
+                '</div>';
+        }
+        html += recRow('Aircraft', _sessionRecords.maxAircraft, '', '');
+        html += recRow('Military', _sessionRecords.maxMilitary, '', '');
+        html += recRow('Max Range', _sessionRecords.maxRange, 'NM', esc(_sessionRecords.maxRange.callsign || ''));
+        html += recRow('Max Altitude', _sessionRecords.maxAltitude, 'ft', esc(_sessionRecords.maxAltitude.callsign || ''));
+        html += recRow('Max Speed', _sessionRecords.maxSpeed, 'kt', esc(_sessionRecords.maxSpeed.callsign || ''));
+        html += '</div>';
+        html += '<button class="rf-cat-btn" style="margin-top:6px" onclick="window._rfResetRecords()">Reset Records</button>';
+        html += '</div>';
+
         html += '<div class="rf-sum-footer">Refreshes every 3s &bull; Manage sections in <span class="rf-sum-footer-link" onclick="window._rfSwitchTab(\'settings\')">Settings &#9881;</span></div>';
         html += '</div>';
 
         listEl.innerHTML = html;
+
+        // Update heatmap each summary render
+        _rfUpdateHeatmap();
 
         var statusEl = document.getElementById('rf-status');
         if (statusEl) statusEl.textContent = total + ' aircraft' + (_panelScope !== 'all' ? ' (' + _rfScopeLabel() + ')' : '');
@@ -2779,6 +3040,8 @@
                     ['views',     'Views',     'Saved filter presets and quick recall'],
                     ['alerts',    'Alerts',    'Plane alert database matches'],
                     ['distance',  'Distance',  'Filter by distance from a point'],
+                    ['ranges',    'Ranges',    'Speed, altitude, squawk & callsign filters'],
+                    ['watchlist', 'Watch',     'Watched aircraft list'],
                 ].map(function (t) {
                     return '<label class="rf-set-tabvis">' +
                         '<input type="checkbox"' + (_tabVisibility[t[0]] ? ' checked' : '') + ' onchange="window._rfSetTabVisible(\'' + t[0] + '\',this.checked)">' +
@@ -2795,6 +3058,41 @@
                 '<div class="rf-set-group-title">Alerts Database</div>' +
                 '<div class="rf-set-group-desc">' + (_alertsTimestamp ? 'Last updated: ' + new Date(_alertsTimestamp).toLocaleString() : 'Not yet loaded') + '</div>' +
                 '<button class="rf-cat-btn" style="margin-top:6px" onclick="window._rfAlertsRefresh()">Refresh Now</button>' +
+                '</div>' +
+
+                '<div class="rf-set-divider"></div>' +
+
+                // ── Notifications ─────────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Notifications</div>' +
+                '<div class="rf-set-group-desc">Browser notifications for significant aircraft events. Requires notification permission.</div>' +
+                '<label class="rf-set-toggle">' +
+                '<input type="checkbox"' + (_notifSettings.enabled ? ' checked' : '') + ' onchange="window._rfSetNotifEnabled(this.checked)">' +
+                '<div class="rf-set-toggle-body">' +
+                '<div class="rf-set-toggle-label">Enable notifications</div>' +
+                '<div class="rf-set-toggle-desc">Show browser notifications for the events below.</div>' +
+                '</div>' +
+                '</label>' +
+                (_notifSettings.enabled ? (
+                    '<label class="rf-set-toggle"><input type="checkbox"' + (_notifSettings.emergency ? ' checked' : '') + ' onchange="window._rfSetNotifOption(\'emergency\',this.checked)">' +
+                    '<div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Emergency squawks (7500/7600/7700)</div></div></label>' +
+                    '<label class="rf-set-toggle"><input type="checkbox"' + (_notifSettings.military ? ' checked' : '') + ' onchange="window._rfSetNotifOption(\'military\',this.checked)">' +
+                    '<div class="rf-set-toggle-body"><div class="rf-set-toggle-label">New military contacts</div></div></label>' +
+                    '<label class="rf-set-toggle"><input type="checkbox"' + (_notifSettings.watchlist ? ' checked' : '') + ' onchange="window._rfSetNotifOption(\'watchlist\',this.checked)">' +
+                    '<div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Watchlist aircraft on scope</div></div></label>' +
+                    '<label class="rf-set-toggle"><input type="checkbox"' + (_notifSettings.customRange ? ' checked' : '') + ' onchange="window._rfSetNotifOption(\'customRange\',this.checked)">' +
+                    '<div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Aircraft within custom range</div></div></label>' +
+                    (_notifSettings.customRange ? '<div class="rf-dist-row"><label class="rf-dist-label">Range (NM)</label><input class="rf-dist-input rf-dist-small" type="number" min="1" max="999" value="' + _notifSettings.customRangeNm + '" onchange="window._rfSetNotifOption(\'customRangeNm\',+this.value)"></div>' : '')
+                ) : '') +
+                '</div>' +
+
+                '<div class="rf-set-divider"></div>' +
+
+                // ── Export CSV ────────────────────────────────────────────────
+                '<div class="rf-set-group">' +
+                '<div class="rf-set-group-title">Export</div>' +
+                '<div class="rf-set-group-desc">Export all currently filtered/visible aircraft data as CSV.</div>' +
+                '<div style="margin-top:8px"><button class="rf-cat-btn rf-export-csv-btn" onclick="window._rfExportCSV()">&#x2B07; Export Aircraft CSV</button></div>' +
                 '</div>' +
 
                 '<div class="rf-set-divider"></div>' +
@@ -3108,6 +3406,459 @@
         if (statusEl) statusEl.textContent = _savedViews.length + ' saved view' + (_savedViews.length === 1 ? '' : 's');
     }
 
+    // ── Ranges tab rendering ──────────────────────────────────────────────────
+    function _rfRenderRangesTab() {
+        var f = _rangesFilter;
+        var esc = _rfEscAttr;
+        function numInput(field, val, placeholder, min, max, step) {
+            return '<input class="rf-rng-input" type="number" placeholder="' + placeholder + '"' +
+                ' min="' + min + '" max="' + max + '" step="' + (step || '1') + '"' +
+                ' value="' + esc(val) + '"' +
+                ' onchange="window._rfSetRange(\'' + field + '\',this.value)">';
+        }
+        function row(label, leftInput, rightInput) {
+            return '<div class="rf-rng-row">' +
+                '<span class="rf-rng-label">' + label + '</span>' +
+                '<span class="rf-rng-pair">' +
+                leftInput + '<span class="rf-rng-sep">to</span>' + rightInput +
+                '</span>' +
+                '</div>';
+        }
+        var sqBtns = ['7700','7600','7500','1200'];
+        var sqHtml = '<div class="rf-rng-sq-btns">';
+        sqBtns.forEach(function(sq) {
+            var active = f.squawk === sq ? ' rf-cat-active' : '';
+            sqHtml += '<button class="rf-cat-btn' + active + '" onclick="window._rfSetRangeSquawk(\'' + sq + '\')">' + sq + '</button>';
+        });
+        sqHtml += '</div>';
+        var html = '<div class="rf-rng-content">';
+        html += '<div class="rf-rng-section-title">Speed (knots)</div>';
+        html += row('', numInput('speedMin', f.speedMin, 'Min', 0, 2000), numInput('speedMax', f.speedMax, 'Max', 0, 2000));
+        html += '<div class="rf-rng-section-title">Altitude (feet)</div>';
+        html += row('', numInput('altMin', f.altMin, 'Min', -1500, 60000), numInput('altMax', f.altMax, 'Max', -1500, 60000));
+        html += '<div class="rf-rng-section-title">Vertical Rate (fpm)</div>';
+        html += row('', numInput('vrMin', f.vrMin, 'Min', -10000, 10000), numInput('vrMax', f.vrMax, 'Max', -10000, 10000));
+        html += '<div class="rf-rng-section-title">Squawk</div>';
+        html += '<div class="rf-rng-row"><input class="rf-rng-input rf-rng-full" type="text" placeholder="e.g. 7700 or 1200-1277 or 7700,7600"' +
+            ' value="' + esc(f.squawk) + '" onchange="window._rfSetRange(\'squawk\',this.value)"></div>';
+        html += sqHtml;
+        html += '<div class="rf-rng-section-title">Age on Scope (minutes)</div>';
+        html += row('', numInput('ageMin', f.ageMin, 'Min', 0, 9999), numInput('ageMax', f.ageMax, 'Max', 0, 9999));
+        html += '<div class="rf-rng-section-title">Callsign / ICAO Search</div>';
+        html += '<div class="rf-rng-row"><input class="rf-rng-input rf-rng-full" type="text" placeholder="Search (supports * wildcard)"' +
+            ' value="' + esc(f.callsign) + '" onchange="window._rfSetRange(\'callsign\',this.value)"></div>';
+        if (_rfRangesFilterActive()) {
+            html += '<div style="margin-top:8px"><button class="rf-cat-btn" onclick="window._rfClearRanges()">Clear All Range Filters</button></div>';
+        }
+        html += '</div>';
+        return html;
+    }
+
+    // ── Watch list tab rendering ──────────────────────────────────────────────
+    function _rfRenderWatchlistTab() {
+        var esc = _rfEscText;
+        var escA = _rfEscAttr;
+        // Build set of ICAOs currently on scope
+        var onScope = {};
+        var distByIcao = {};
+        if (gReady()) {
+            var rxLat2 = null, rxLon2 = null;
+            try {
+                if (typeof SiteLat !== 'undefined' && SiteLat) { rxLat2 = +SiteLat; rxLon2 = +SiteLon; }
+                else if (typeof g !== 'undefined' && g.SitePosition) { rxLat2 = g.SitePosition.lat; rxLon2 = g.SitePosition.lng; }
+            } catch(e) {}
+            for (var pi = 0; pi < g.planesOrdered.length; pi++) {
+                var lp = g.planesOrdered[pi];
+                if (lp.icao) {
+                    onScope[lp.icao.toUpperCase()] = lp;
+                    if (rxLat2 !== null) {
+                        var plat2, plon2;
+                        if (lp.position && lp.position.length >= 2) { plon2 = +lp.position[0]; plat2 = +lp.position[1]; }
+                        else { plat2 = +lp.lat; plon2 = +lp.lon; }
+                        if (!isNaN(plat2) && !isNaN(plon2)) distByIcao[lp.icao.toUpperCase()] = haversineNm(rxLat2, rxLon2, plat2, plon2);
+                    }
+                }
+            }
+        }
+        var html = '<div class="rf-wl-content">';
+        // Map filter toggle
+        html += '<div class="rf-wl-actions">';
+        html += '<button class="rf-cat-btn' + (_watchlistMapFilter ? ' rf-cat-active' : '') + '" onclick="window._rfWatchlistToggleMapFilter()">' +
+            'Map Filter: ' + (_watchlistMapFilter ? 'ON' : 'OFF') + '</button>';
+        html += '<button class="rf-cat-btn" onclick="window._rfWatchlistExport()">Export</button>';
+        html += '</div>';
+        // Add form
+        html += '<div class="rf-wl-add-row">';
+        html += '<input id="rf-wl-icao-input" class="rf-rng-input" type="text" placeholder="ICAO hex (e.g. 4CA123)" style="width:90px">';
+        html += '<input id="rf-wl-label-input" class="rf-rng-input" type="text" placeholder="Label (optional)" style="flex:1">';
+        html += '<button class="rf-cat-btn" onclick="window._rfWatchlistAddFromForm()">Add</button>';
+        html += '</div>';
+        // List
+        if (_watchList.length === 0) {
+            html += '<div class="rf-sum-none">No aircraft on watch list. Add ICAOs above.</div>';
+        } else {
+            html += '<div class="rf-wl-list">';
+            for (var wi = 0; wi < _watchList.length; wi++) {
+                var wEntry = _watchList[wi];
+                var wIcao = (wEntry.icao || '').toUpperCase();
+                var wLive = !!onScope[wIcao];
+                var wDist = distByIcao[wIcao];
+                var distTxt = (typeof wDist === 'number') ? wDist.toFixed(0) + '\u2009nm' : '';
+                html += '<div class="rf-wl-row">';
+                html += '<span class="rf-wl-dot ' + (wLive ? 'rf-wl-dot-on' : 'rf-wl-dot-off') + '" title="' + (wLive ? 'On scope' : 'Not on scope') + '"></span>';
+                html += '<span class="rf-wl-icao">' + esc(wIcao) + '</span>';
+                html += '<input class="rf-rng-input rf-wl-label-edit" type="text" value="' + escA(wEntry.label || '') + '" placeholder="Label"' +
+                    ' onchange="window._rfWatchlistSetLabel(' + wi + ',this.value)">';
+                if (distTxt) html += '<span class="rf-wl-dist">' + distTxt + '</span>';
+                html += '<button class="rf-dist-pill-x" onclick="window._rfWatchlistRemove(' + wi + ')" title="Remove">\u2715</button>';
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+        html += '</div>';
+        return html;
+    }
+
+    // ── Ranges tab window functions ───────────────────────────────────────────
+    function _rfSaveRanges() {
+        try { localStorage.setItem(RANGES_KEY, JSON.stringify(_rangesFilter)); } catch(e) {}
+    }
+
+    window._rfSetRange = function(field, val) {
+        if (!_rangesFilter.hasOwnProperty(field)) return;
+        _rangesFilter[field] = String(val || '');
+        _rfSaveRanges();
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfSetRangeSquawk = function(sq) {
+        _rangesFilter.squawk = (_rangesFilter.squawk === sq) ? '' : sq;
+        _rfSaveRanges();
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfClearRanges = function() {
+        var rk = Object.keys(_rangesFilter);
+        for (var ri = 0; ri < rk.length; ri++) _rangesFilter[rk[ri]] = '';
+        _rfSaveRanges();
+        applyFilter();
+        buildPanel();
+    };
+
+    // ── Watchlist window functions ────────────────────────────────────────────
+    function _rfSaveWatchlist() {
+        try { localStorage.setItem(WATCHLIST_KEY, JSON.stringify({ list: _watchList, mapFilter: _watchlistMapFilter })); } catch(e) {}
+    }
+
+    window._rfWatchlistAddFromForm = function() {
+        var icaoEl = document.getElementById('rf-wl-icao-input');
+        var labelEl = document.getElementById('rf-wl-label-input');
+        var icao = (icaoEl ? icaoEl.value.trim().toUpperCase() : '');
+        var label = (labelEl ? labelEl.value.trim() : '');
+        if (!icao) return;
+        window._rfWatchlistAdd(icao, label);
+        if (icaoEl) icaoEl.value = '';
+        if (labelEl) labelEl.value = '';
+    };
+
+    window._rfWatchlistAdd = function(icao, label) {
+        icao = (icao || '').toUpperCase();
+        if (!icao) return;
+        // Don't add duplicates
+        for (var wi = 0; wi < _watchList.length; wi++) {
+            if ((_watchList[wi].icao || '').toUpperCase() === icao) return;
+        }
+        _watchList.push({ icao: icao, label: label || '', added: Date.now() });
+        _rfSaveWatchlist();
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfWatchlistRemove = function(idx) {
+        if (idx < 0 || idx >= _watchList.length) return;
+        _watchList.splice(idx, 1);
+        _rfSaveWatchlist();
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfWatchlistSetLabel = function(idx, label) {
+        if (idx < 0 || idx >= _watchList.length) return;
+        _watchList[idx].label = label || '';
+        _rfSaveWatchlist();
+    };
+
+    window._rfWatchlistToggleMapFilter = function() {
+        _watchlistMapFilter = !_watchlistMapFilter;
+        _rfSaveWatchlist();
+        applyFilter();
+        buildPanel();
+    };
+
+    window._rfWatchlistExport = function() {
+        try {
+            var rows = ['ICAO,Label,Added'];
+            _watchList.forEach(function(e) {
+                rows.push('"' + (e.icao || '') + '","' + (e.label || '').replace(/"/g, '""') + '",' + (e.added || ''));
+            });
+            var blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'watchlist.csv';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(function() { try { URL.revokeObjectURL(a.href); document.body.removeChild(a); } catch(e) {} }, 0);
+        } catch(e) {}
+    };
+
+    // ── Notifications ─────────────────────────────────────────────────────────
+    function _rfSaveNotifSettings() {
+        try { localStorage.setItem(NOTIF_KEY, JSON.stringify(_notifSettings)); } catch(e) {}
+    }
+
+    function _rfNotify(title, body, key) {
+        var now = Date.now();
+        if (_notifSeen[key] && (now - _notifSeen[key]) < 5 * 60 * 1000) return;
+        _notifSeen[key] = now;
+        try {
+            if (typeof Notification === 'undefined') return;
+            if (Notification.permission !== 'granted') return;
+            new Notification('[RF] ' + title, { body: body, icon: '/favicon.ico' });
+        } catch(e) {}
+    }
+
+    function _rfCheckNotifications() {
+        if (!_notifSettings.enabled) return;
+        if (!gReady()) return;
+        var now = Date.now();
+        if ((now - _notifLastCheck) < 10000) return;
+        _notifLastCheck = now;
+        var rxLat3 = null, rxLon3 = null;
+        try {
+            if (typeof SiteLat !== 'undefined' && SiteLat) { rxLat3 = +SiteLat; rxLon3 = +SiteLon; }
+            else if (typeof g !== 'undefined' && g.SitePosition) { rxLat3 = g.SitePosition.lat; rxLon3 = g.SitePosition.lng; }
+        } catch(e) {}
+        var planes = g.planesOrdered;
+        for (var ni = 0; ni < planes.length; ni++) {
+            var np = planes[ni];
+            var nicao = (np.icao || '').toUpperCase();
+            var firstSeenMs = _sumArrivals[np.icao] || now;
+            var isNew = (now - firstSeenMs) < 30000;
+            // Emergency squawk
+            if (_notifSettings.emergency && np.squawk) {
+                if (np.squawk === '7700') _rfNotify('Emergency 7700', (np.flight || nicao) + ' squawking Emergency', nicao + '_7700');
+                else if (np.squawk === '7600') _rfNotify('Radio Failure 7600', (np.flight || nicao) + ' squawking Radio Fail', nicao + '_7600');
+                else if (np.squawk === '7500') _rfNotify('Hijack 7500', (np.flight || nicao) + ' squawking Hijack', nicao + '_7500');
+            }
+            // Military
+            if (_notifSettings.military && isNew && isMilitaryAircraft(np)) {
+                _rfNotify('Military Contact', (np.flight || nicao) + ' military aircraft detected', nicao + '_mil');
+            }
+            // Watchlist
+            if (_notifSettings.watchlist && isNew) {
+                for (var wi2 = 0; wi2 < _watchList.length; wi2++) {
+                    if ((_watchList[wi2].icao || '').toUpperCase() === nicao) {
+                        _rfNotify('Watchlist Aircraft', nicao + ' (' + (_watchList[wi2].label || 'watchlist') + ') on scope', nicao + '_wl');
+                        break;
+                    }
+                }
+            }
+            // Custom range
+            if (_notifSettings.customRange && isNew && rxLat3 !== null) {
+                var plat3, plon3;
+                if (np.position && np.position.length >= 2) { plon3 = +np.position[0]; plat3 = +np.position[1]; }
+                else { plat3 = +np.lat; plon3 = +np.lon; }
+                if (!isNaN(plat3) && !isNaN(plon3)) {
+                    var dist3 = haversineNm(rxLat3, rxLon3, plat3, plon3);
+                    if (dist3 <= _notifSettings.customRangeNm) {
+                        _rfNotify('Aircraft in Range', (np.flight || nicao) + ' within ' + _notifSettings.customRangeNm + ' NM', nicao + '_rng');
+                    }
+                }
+            }
+        }
+    }
+
+    window._rfSetNotifEnabled = function(on) {
+        _notifSettings.enabled = !!on;
+        if (on && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+        _rfSaveNotifSettings();
+        buildPanel();
+    };
+
+    window._rfSetNotifOption = function(key, val) {
+        if (_notifSettings.hasOwnProperty(key)) {
+            _notifSettings[key] = (typeof val === 'boolean') ? val : val;
+        }
+        _rfSaveNotifSettings();
+        buildPanel();
+    };
+
+    // ── Session records ───────────────────────────────────────────────────────
+    function _rfSaveRecords() {
+        try { localStorage.setItem(RECORDS_KEY, JSON.stringify(_sessionRecords)); } catch(e) {}
+    }
+
+    function _rfUpdateSessionRecords(planes) {
+        var now = new Date().toLocaleDateString();
+        var rxLat4 = null, rxLon4 = null;
+        try {
+            if (typeof SiteLat !== 'undefined' && SiteLat) { rxLat4 = +SiteLat; rxLon4 = +SiteLon; }
+            else if (typeof g !== 'undefined' && g.SitePosition) { rxLat4 = g.SitePosition.lat; rxLon4 = g.SitePosition.lng; }
+        } catch(e) {}
+        var milCount = 0;
+        var changed = false;
+        for (var ri = 0; ri < planes.length; ri++) {
+            var rp = planes[ri];
+            if (isMilitaryAircraft(rp)) milCount++;
+            // Max altitude
+            var rAlt = typeof rp.altitude === 'number' ? rp.altitude : (typeof rp.alt_baro === 'number' ? rp.alt_baro : null);
+            if (rAlt !== null && rAlt > _sessionRecords.maxAltitude.val) {
+                _sessionRecords.maxAltitude = { val: rAlt, icao: rp.icao || '', callsign: rp.flight || rp.icao || '', date: now };
+                changed = true;
+            }
+            // Max speed
+            if (typeof rp.gs === 'number' && rp.gs > _sessionRecords.maxSpeed.val) {
+                _sessionRecords.maxSpeed = { val: Math.round(rp.gs), icao: rp.icao || '', callsign: rp.flight || rp.icao || '', date: now };
+                changed = true;
+            }
+            // Max range
+            if (rxLat4 !== null) {
+                var rplat, rplon;
+                if (rp.position && rp.position.length >= 2) { rplon = +rp.position[0]; rplat = +rp.position[1]; }
+                else { rplat = +rp.lat; rplon = +rp.lon; }
+                if (!isNaN(rplat) && !isNaN(rplon)) {
+                    var rdist = haversineNm(rxLat4, rxLon4, rplat, rplon);
+                    if (rdist > _sessionRecords.maxRange.val) {
+                        _sessionRecords.maxRange = { val: Math.round(rdist), icao: rp.icao || '', callsign: rp.flight || rp.icao || '', date: now };
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (planes.length > _sessionRecords.maxAircraft.val) {
+            _sessionRecords.maxAircraft = { val: planes.length, date: now };
+            changed = true;
+        }
+        if (milCount > _sessionRecords.maxMilitary.val) {
+            _sessionRecords.maxMilitary = { val: milCount, date: now };
+            changed = true;
+        }
+        if (changed) _rfSaveRecords();
+    }
+
+    window._rfResetRecords = function() {
+        if (!confirm('Reset all session records?')) return;
+        _sessionRecords = {
+            maxAircraft: { val: 0, date: '' },
+            maxMilitary: { val: 0, date: '' },
+            maxRange:    { val: 0, icao: '', callsign: '', date: '' },
+            maxAltitude: { val: 0, icao: '', callsign: '', date: '' },
+            maxSpeed:    { val: 0, icao: '', callsign: '', date: '' }
+        };
+        _rfSaveRecords();
+        buildPanel();
+    };
+
+    // ── Export CSV ────────────────────────────────────────────────────────────
+    window._rfExportCSV = function() {
+        if (!gReady()) return;
+        var header = 'ICAO,Callsign,Type,Operator,Country,Altitude,Speed,VertRate,Heading,Lat,Lon,Distance_NM,Squawk,Military,OnGround,FirstSeen';
+        var rxLat5 = null, rxLon5 = null;
+        try {
+            if (typeof SiteLat !== 'undefined' && SiteLat) { rxLat5 = +SiteLat; rxLon5 = +SiteLon; }
+            else if (typeof g !== 'undefined' && g.SitePosition) { rxLat5 = g.SitePosition.lat; rxLon5 = g.SitePosition.lng; }
+        } catch(e) {}
+        var rows = [header];
+        var planes = g.planesOrdered;
+        for (var ci = 0; ci < planes.length; ci++) {
+            var cp = planes[ci];
+            if (!planePassesAllFilters(cp, null)) continue;
+            var cAlt = typeof cp.altitude === 'number' ? cp.altitude : (typeof cp.alt_baro === 'number' ? cp.alt_baro : (cp.altitude === 'ground' ? 0 : ''));
+            var cGs = typeof cp.gs === 'number' ? Math.round(cp.gs) : '';
+            var cVr = typeof cp.geom_rate === 'number' ? cp.geom_rate : (typeof cp.baro_rate === 'number' ? cp.baro_rate : '');
+            var cHdg = typeof cp.track === 'number' ? Math.round(cp.track) : '';
+            var cLat = '', cLon = '', cDist = '';
+            if (cp.position && cp.position.length >= 2) { cLon = +cp.position[0]; cLat = +cp.position[1]; }
+            else if (!isNaN(+cp.lat)) { cLat = +cp.lat; cLon = +cp.lon; }
+            if (cLat !== '' && rxLat5 !== null) cDist = haversineNm(rxLat5, rxLon5, +cLat, +cLon).toFixed(1);
+            var cMil = isMilitaryAircraft(cp) ? '1' : '0';
+            var cGnd = (cp.altitude === 'ground' || cp.alt_baro === 'ground') ? '1' : '0';
+            var rcI = getRegCountryFromIcao(cp.icao);
+            var cCtry = rcI ? rcI.name : '';
+            var cFs = _sumArrivals[cp.icao] ? new Date(_sumArrivals[cp.icao]).toISOString() : '';
+            function csvq(v) { var s = String(v === undefined || v === null ? '' : v); if (s.indexOf(',') >= 0 || s.indexOf('"') >= 0) s = '"' + s.replace(/"/g, '""') + '"'; return s; }
+            rows.push([
+                csvq(cp.icao || ''), csvq(cp.flight || cp.name || ''), csvq(cp.icaoType || cp.typeLong || ''),
+                csvq(''), csvq(cCtry), csvq(cAlt), csvq(cGs), csvq(cVr), csvq(cHdg),
+                csvq(cLat), csvq(cLon), csvq(cDist), csvq(cp.squawk || ''),
+                csvq(cMil), csvq(cGnd), csvq(cFs)
+            ].join(','));
+        }
+        var blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        var dt = new Date();
+        a.download = 'aircraft-' + dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0') + '.csv';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function() { try { URL.revokeObjectURL(a.href); document.body.removeChild(a); } catch(e) {} }, 0);
+    };
+
+    // ── Heatmap ───────────────────────────────────────────────────────────────
+    function _rfUpdateHeatmap() {
+        if (!_rfHeatmapEnabled || !_rfHeatmapLayer) return;
+        try {
+            var src = _rfHeatmapLayer.getSource ? _rfHeatmapLayer.getSource() : null;
+            if (!src) return;
+            src.clear();
+            if (!gReady()) return;
+            var planes = g.planesOrdered;
+            var features = [];
+            for (var hi = 0; hi < planes.length; hi++) {
+                var hp = planes[hi];
+                var hLat, hLon;
+                if (hp.position && hp.position.length >= 2) { hLon = +hp.position[0]; hLat = +hp.position[1]; }
+                else { hLat = +hp.lat; hLon = +hp.lon; }
+                if (isNaN(hLat) || isNaN(hLon)) continue;
+                var feat = new ol.Feature({ geometry: new ol.geom.Point(ol.proj.fromLonLat([hLon, hLat])) });
+                var hAlt = typeof hp.altitude === 'number' ? hp.altitude : (typeof hp.alt_baro === 'number' ? hp.alt_baro : 10000);
+                feat.set('weight', Math.min(1, Math.max(0.1, hAlt / 40000)));
+                features.push(feat);
+            }
+            src.addFeatures(features);
+        } catch(e) {}
+    }
+
+    window._rfToggleHeatmap = function() {
+        _rfHeatmapEnabled = !_rfHeatmapEnabled;
+        try {
+            if (_rfHeatmapEnabled) {
+                if (!window.ol || !ol.layer || !ol.layer.Heatmap) { _rfHeatmapEnabled = false; return; }
+                if (!_rfHeatmapLayer) {
+                    var hSrc = new ol.source.Vector({ wrapX: false });
+                    _rfHeatmapLayer = new ol.layer.Heatmap({ source: hSrc, blur: 20, radius: 15, zIndex: 9998 });
+                    var m = _rfOLMap();
+                    if (m) m.addLayer(_rfHeatmapLayer);
+                }
+                _rfUpdateHeatmap();
+                try { var hm = _rfOLMap(); if (hm) hm.render(); } catch(e) {}
+            } else {
+                if (_rfHeatmapLayer) {
+                    try {
+                        var m2 = _rfOLMap();
+                        if (m2) m2.removeLayer(_rfHeatmapLayer);
+                    } catch(e) {}
+                    _rfHeatmapLayer = null;
+                }
+            }
+        } catch(e) { console.warn('[RF] heatmap error:', e); }
+        if (state.panelOpen && state.activeTab === 'summary') buildPanel();
+    };
+
     // ── Panel rendering ───────────────────────────────────────────────────────
     function buildPanel() {
         var tab = state.activeTab;
@@ -3140,6 +3891,48 @@
         // Alerts tab: separate rendering path
         if (tab === 'alerts') {
             buildAlertsPanel();
+            return;
+        }
+
+        // Ranges tab: separate rendering path
+        if (tab === 'ranges') {
+            buildBreadcrumb();
+            var searchEl3 = document.getElementById('rf-search');
+            if (searchEl3) searchEl3.style.display = 'none';
+            var ctrlEl3 = document.getElementById('rf-controls');
+            if (ctrlEl3) ctrlEl3.innerHTML = '';
+            var hdrEl3 = document.getElementById('rf-colheader');
+            if (hdrEl3) hdrEl3.innerHTML = '';
+            var listEl3 = document.getElementById('rf-list');
+            if (listEl3) listEl3.innerHTML = _rfRenderRangesTab();
+            var statusEl3 = document.getElementById('rf-status');
+            if (statusEl3 && gReady()) {
+                var rngCount = 0;
+                for (var rci = 0; rci < g.planesOrdered.length; rci++) {
+                    if (planePassesRangesFilter(g.planesOrdered[rci])) rngCount++;
+                }
+                statusEl3.textContent = rngCount + ' aircraft pass range filters';
+            }
+            var btn3 = document.getElementById('rf-btn');
+            if (btn3) btn3.className = 'button ' + (isFilterActive() ? 'activeButton' : 'inActiveButton');
+            return;
+        }
+
+        // Watchlist tab: separate rendering path
+        if (tab === 'watchlist') {
+            buildBreadcrumb();
+            var searchEl4 = document.getElementById('rf-search');
+            if (searchEl4) searchEl4.style.display = 'none';
+            var ctrlEl4 = document.getElementById('rf-controls');
+            if (ctrlEl4) ctrlEl4.innerHTML = '';
+            var hdrEl4 = document.getElementById('rf-colheader');
+            if (hdrEl4) hdrEl4.innerHTML = '';
+            var listEl4 = document.getElementById('rf-list');
+            if (listEl4) listEl4.innerHTML = _rfRenderWatchlistTab();
+            var statusEl4 = document.getElementById('rf-status');
+            if (statusEl4) statusEl4.textContent = _watchList.length + ' aircraft on watch list';
+            var btn4 = document.getElementById('rf-btn');
+            if (btn4) btn4.className = 'button ' + (isFilterActive() ? 'activeButton' : 'inActiveButton');
             return;
         }
 
@@ -3605,8 +4398,20 @@
         try { localStorage.removeItem(DIST_MODE_KEY); } catch (e) {}
         try { localStorage.removeItem(VIEWS_KEY); } catch (e) {}
         try { localStorage.removeItem(ALERTS_LS_KEY); } catch (e) {}
+        try { localStorage.removeItem(RANGES_KEY); } catch (e) {}
+        try { localStorage.removeItem(WATCHLIST_KEY); } catch (e) {}
+        try { localStorage.removeItem(NOTIF_KEY); } catch (e) {}
+        try { localStorage.removeItem(RECORDS_KEY); } catch (e) {}
         try { document.cookie = HOME_COOKIE_KEY + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'; } catch (e) {}
         try { document.cookie = PERSIST_COOKIE_KEY + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'; } catch (e) {}
+
+        // Reset new state
+        var rk3 = Object.keys(_rangesFilter);
+        for (var ri3 = 0; ri3 < rk3.length; ri3++) _rangesFilter[rk3[ri3]] = '';
+        _watchList = [];
+        _watchlistMapFilter = false;
+        _notifSettings = { enabled: false, military: true, emergency: true, watchlist: true, customRange: false, customRangeNm: 20, newAircraft: false };
+        _sessionRecords = { maxAircraft: { val: 0, date: '' }, maxMilitary: { val: 0, date: '' }, maxRange: { val: 0, icao: '', callsign: '', date: '' }, maxAltitude: { val: 0, icao: '', callsign: '', date: '' }, maxSpeed: { val: 0, icao: '', callsign: '', date: '' } };
 
         settings.displayMode = 'sidebar';
         settings.sidebarSide = 'right';
@@ -4012,6 +4817,9 @@
             tabs: _tabVisibility,
             summary: _summarySettings,
             views: _savedViews,
+            ranges: JSON.parse(JSON.stringify(_rangesFilter)),
+            watchlist: { list: _watchList, mapFilter: _watchlistMapFilter },
+            notifSettings: JSON.parse(JSON.stringify(_notifSettings)),
         };
     }
 
@@ -4044,6 +4852,22 @@
         if (Array.isArray(snap.views)) {
             _savedViews = snap.views;
             for (var vi = 0; vi < _savedViews.length; vi++) _rfEnsureViewShape(_savedViews[vi]);
+        }
+        if (snap.ranges && typeof snap.ranges === 'object') {
+            var snapRk = Object.keys(_rangesFilter);
+            for (var snapRi = 0; snapRi < snapRk.length; snapRi++) {
+                if (typeof snap.ranges[snapRk[snapRi]] !== 'undefined') _rangesFilter[snapRk[snapRi]] = String(snap.ranges[snapRk[snapRi]]);
+            }
+        }
+        if (snap.watchlist) {
+            if (Array.isArray(snap.watchlist.list)) _watchList = snap.watchlist.list;
+            if (typeof snap.watchlist.mapFilter === 'boolean') _watchlistMapFilter = snap.watchlist.mapFilter;
+        }
+        if (snap.notifSettings && typeof snap.notifSettings === 'object') {
+            var nfSnapKeys = Object.keys(_notifSettings);
+            for (var nfSnapI = 0; nfSnapI < nfSnapKeys.length; nfSnapI++) {
+                if (typeof snap.notifSettings[nfSnapKeys[nfSnapI]] !== 'undefined') _notifSettings[nfSnapKeys[nfSnapI]] = snap.notifSettings[nfSnapKeys[nfSnapI]];
+            }
         }
         _rfSyncActiveViewPointers();
         return true;
@@ -5125,7 +5949,40 @@
                 }),
             }));
 
-            src.addFeatures([ringFeat, dotFeat, lblFeat]);
+            // Cardinal bearing labels at N/E/S/W on the ring edge
+            var bearingFeats = [];
+            var bearingDirs = [
+                { label: 'N', dx: 0,       dy: radiusM  },
+                { label: 'E', dx: radiusM,  dy: 0        },
+                { label: 'S', dx: 0,       dy: -radiusM },
+                { label: 'W', dx: -radiusM, dy: 0        }
+            ];
+            // In EPSG:3857 1 meter ≈ 1 OL unit at equator, but varies with latitude.
+            // Scale factor: 1 / cos(lat * PI/180) corrects northing; easting needs no correction.
+            var latRad = zone.lat * Math.PI / 180;
+            var mPerOLunit = 1.0;  // at equator; adjust for latitude
+            var cosLat = Math.cos(latRad);
+            bearingDirs.forEach(function(bd) {
+                // project offset in OL units: N/S scaled by 1/cosLat for lat distortion
+                var ox = bd.dx;
+                var oy = (cosLat > 0.01) ? (bd.dy / cosLat) : bd.dy;
+                var bPt = [center[0] + ox, center[1] + oy];
+                var bFeat = new ol.Feature({ geometry: new ol.geom.Point(bPt) });
+                bFeat.set('_rfDist', true);
+                bFeat.setStyle(new ol.style.Style({
+                    text: new ol.style.Text({
+                        text: bd.label,
+                        font: 'bold 11px sans-serif',
+                        fill: new ol.style.Fill({ color: color }),
+                        stroke: new ol.style.Stroke({ color: 'rgba(0,0,0,0.7)', width: 2 }),
+                        textAlign: 'center',
+                        textBaseline: 'middle',
+                    })
+                }));
+                bearingFeats.push(bFeat);
+            });
+
+            src.addFeatures([ringFeat, dotFeat, lblFeat].concat(bearingFeats));
         });
     }
 
@@ -5429,6 +6286,11 @@
         _alertsSelectedIcaos.clear();
         _distanceZones = [];
         _sumFilter.clear();
+        // Reset ranges filter
+        var rk = Object.keys(_rangesFilter);
+        for (var ri = 0; ri < rk.length; ri++) _rangesFilter[rk[ri]] = '';
+        // Reset watchlist map filter
+        _watchlistMapFilter = false;
         _rfRestoreMapView();
         applyFilter();
         buildPanel();
@@ -5580,6 +6442,8 @@
             '  <div id="rf-tab-views"     class="rf-tab"               onclick="window._rfSwitchTab(\'views\')">Views</div>',
             '  <div id="rf-tab-alerts"    class="rf-tab"               onclick="window._rfSwitchTab(\'alerts\')">Alerts</div>',
             '  <div id="rf-tab-distance"  class="rf-tab"               onclick="window._rfSwitchTab(\'distance\')">Distance</div>',
+            '  <div id="rf-tab-ranges"    class="rf-tab"               onclick="window._rfSwitchTab(\'ranges\')">Ranges</div>',
+            '  <div id="rf-tab-watchlist" class="rf-tab"               onclick="window._rfSwitchTab(\'watchlist\')">Watch</div>',
             '  <div id="rf-tab-settings"  class="rf-tab rf-tab-gear"   onclick="window._rfSwitchTab(\'settings\')">&#9881;</div>',
             '</div>',
             '<div id="rf-scope-global" class="rf-scope-global"></div>',
@@ -5705,6 +6569,50 @@
             var dm = localStorage.getItem(DIST_MODE_KEY);
             if (dm === 'inside' || dm === 'outside' || dm === 'maponly') _distanceMode = dm;
         } catch(e) {}
+        // Load ranges filter
+        try {
+            var rngSaved = localStorage.getItem(RANGES_KEY);
+            if (rngSaved) {
+                var rngP = JSON.parse(rngSaved);
+                var rngKeys = Object.keys(_rangesFilter);
+                for (var rli = 0; rli < rngKeys.length; rli++) {
+                    if (typeof rngP[rngKeys[rli]] !== 'undefined') _rangesFilter[rngKeys[rli]] = String(rngP[rngKeys[rli]]);
+                }
+            }
+        } catch(e) {}
+        // Load watchlist
+        try {
+            var wlSaved = localStorage.getItem(WATCHLIST_KEY);
+            if (wlSaved) {
+                var wlP = JSON.parse(wlSaved);
+                if (Array.isArray(wlP.list)) _watchList = wlP.list;
+                if (typeof wlP.mapFilter === 'boolean') _watchlistMapFilter = wlP.mapFilter;
+            }
+        } catch(e) {}
+        // Load notifications settings
+        try {
+            var nfSaved = localStorage.getItem(NOTIF_KEY);
+            if (nfSaved) {
+                var nfP = JSON.parse(nfSaved);
+                var nfKeys = Object.keys(_notifSettings);
+                for (var nli = 0; nli < nfKeys.length; nli++) {
+                    if (typeof nfP[nfKeys[nli]] !== 'undefined') _notifSettings[nfKeys[nli]] = nfP[nfKeys[nli]];
+                }
+            }
+        } catch(e) {}
+        // Load session records
+        try {
+            var recSaved = localStorage.getItem(RECORDS_KEY);
+            if (recSaved) {
+                var recP = JSON.parse(recSaved);
+                var recKeys = Object.keys(_sessionRecords);
+                for (var recI = 0; recI < recKeys.length; recI++) {
+                    if (recP[recKeys[recI]] && typeof recP[recKeys[recI]] === 'object') {
+                        _sessionRecords[recKeys[recI]] = recP[recKeys[recI]];
+                    }
+                }
+            }
+        } catch(e) {}
 
         installFilterHook();
 
@@ -5731,7 +6639,7 @@
         // Re-wire _rfSwitchTab to update tab highlights
         var origSwitch = window._rfSwitchTab;
         window._rfSwitchTab = function (tab) {
-            ['summary','airports','countries','operators','aircraft','views','alerts','distance','settings'].forEach(function (t) {
+            ['summary','airports','countries','operators','aircraft','views','alerts','distance','ranges','watchlist','settings'].forEach(function (t) {
                 var el = document.getElementById('rf-tab-' + t);
                 if (el) el.className = 'rf-tab' + (t === 'settings' ? ' rf-tab-gear' : '') + (t === tab ? ' rf-tab-active' : '');
             });
@@ -5767,6 +6675,10 @@
             // Keep active view map behavior synced as aircraft move.
             _rfApplyActiveViewsMapBehavior(false);
             if (isFilterActive()) triggerRedraw();
+            // Check notifications (rate-limited internally to 10s)
+            _rfCheckNotifications();
+            // Update heatmap layer if active
+            if (_rfHeatmapEnabled) _rfUpdateHeatmap();
         }, 3000);
     }
 

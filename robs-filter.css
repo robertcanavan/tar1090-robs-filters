@@ -1981,6 +1981,7 @@
 .rf-dist-map {
     width: 100%;
     height: 200px;
+    min-height: 160px;
     border-radius: 4px;
     overflow: hidden;
     margin-bottom: 8px;

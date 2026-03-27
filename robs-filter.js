@@ -332,7 +332,7 @@
         if (!icao || icao.length < 2) return 'Unknown';
         if (icao[0] === 'K') return 'United States';
         if (icao[0] === 'P' && icao.length === 4) return 'United States';
-        if (icao[0] === 'C') return 'Canada';
+        if (icao[0] === 'C') return 'Canada'; // ICAO standard: all Canadian airports begin with 'C'
         return PREFIX_COUNTRY[icao.substring(0, 2).toUpperCase()] || ('Other (' + icao.substring(0, 2).toUpperCase() + ')');
     }
 
@@ -367,7 +367,8 @@
     // Get ISO2 for a country name — tries dynamic DB map first, then hardcoded.
     function _toIso2(name) {
         if (!name) return '';
-        try { var v = _countryIso2.get(name); if (v) return v; } catch(e) {}
+        var v = _countryIso2.get(name);
+        if (v) return v;
         return COUNTRY_ISO2_MAP[name] || '';
     }
 
@@ -485,7 +486,7 @@
         [0x004000,0x0043FF,'ZW'],[0x006000,0x006FFF,'MZ'],[0x008000,0x008FFF,'ZA'],
         [0x00A000,0x00A3FF,'BW'],[0x010000,0x017FFF,'EG'],[0x018000,0x01FFFF,'LY'],
         [0x020000,0x027FFF,'MA'],[0x028000,0x02FFFF,'TN'],[0x030000,0x033FFF,'GH'],
-        [0x034000,0x034FFF,'NG'],[0x035000,0x038FFF,'NG'],[0x038000,0x03FFFF,'NG'],
+        [0x034000,0x034FFF,'NG'],[0x035000,0x037FFF,'NG'],[0x038000,0x03FFFF,'NG'],
         [0x040000,0x043FFF,'ET'],[0x044000,0x047FFF,'KE'],[0x048000,0x04BFFF,'UG'],
         [0x04C000,0x04FFFF,'TZ'],[0x050000,0x057FFF,'ZA'],[0x058000,0x05FFFF,'ZM'],
         [0x060000,0x063FFF,'AO'],[0x064000,0x067FFF,'MZ'],[0x068000,0x06BFFF,'ZW'],
@@ -536,7 +537,7 @@
         return null;
     }
 
-    // ── Module-level caches (rebuilt on every getAircraftData call) ───────────
+    // ── Module-level caches (rebuilt by getAircraftData when dirty) ──────────
     let _airportLabels   = new Map(); // icao → "Airport Name"
     let _airportIso2     = new Map(); // icao → iso2
     let _countryIso2     = new Map(); // country name → iso2
@@ -547,6 +548,12 @@
     let _allRegCountries      = new Map(); // name → iso2 (for country dropdown)
     let _militaryTypeKeys     = new Set(); // typeKeys where at least one plane is military
     var _catCounts = {}; // catId → count of aircraft in that category (populated by getAircraftData)
+
+    // Cache key / result for getAircraftData — avoids redundant full rebuilds on the 3s tick.
+    // Invalidated by applyFilter() on every filter change.
+    var _rfDataDirty      = true;
+    var _rfDataLastKey    = '';
+    var _rfDataLastResult = null;
 
     function getAircraftCategory(typeKey) {
         if (!typeKey) return 0;
@@ -615,19 +622,26 @@
 
     // ── Data aggregation ──────────────────────────────────────────────────────
     function getAircraftData(excludeTab) {
+        // Return cached result if nothing has changed since the last build.
+        var _cacheKey = (gReady() ? g.planesOrdered.length : 0) + '|' + _panelScope + '|' + (excludeTab || '');
+        if (!_rfDataDirty && _cacheKey === _rfDataLastKey && _rfDataLastResult) {
+            return _rfDataLastResult;
+        }
+
         const airports  = new Map(); // icao → {from, to}
         const countries = new Map(); // country name → {from, to}
         const operators = new Map();
         const aircraft  = new Map();
-        _airportLabels   = new Map();
-        _airportIso2     = new Map();
-        _countryIso2     = new Map();
-        _aircraftIcaoMap = new Map();
-        _aircraftAdsbCat = new Map();
-        _aircraftWtc     = new Map();
-        _aircraftRegCountries = new Map();
-        _allRegCountries      = new Map();
-        _militaryTypeKeys     = new Set();
+        // Clear existing maps in-place (cheaper than allocating new ones each tick)
+        _airportLabels.clear();
+        _airportIso2.clear();
+        _countryIso2.clear();
+        _aircraftIcaoMap.clear();
+        _aircraftAdsbCat.clear();
+        _aircraftWtc.clear();
+        _aircraftRegCountries.clear();
+        _allRegCountries.clear();
+        _militaryTypeKeys.clear();
         _catCounts = {};
 
         if (!gReady()) return { airports, countries, operators, aircraft };
@@ -756,7 +770,11 @@
             });
         }
 
-        return { airports, countries, operators, aircraft };
+        var _result = { airports, countries, operators, aircraft };
+        _rfDataDirty      = false;
+        _rfDataLastKey    = _cacheKey;
+        _rfDataLastResult = _result;
+        return _result;
     }
 
     // ── Per-plane filter check ────────────────────────────────────────────────
@@ -844,64 +862,40 @@
     function _rfRegCountry(reg, icao) {
         if (reg) {
             var r = reg.toUpperCase();
+            // Names here must match ISO_COUNTRY values so Summary country grouping is consistent
+            // with the ICAO hex fallback below (which goes through countryFromIso).
             var pfx = [
-                ['G-','UK'],         ['D-','Germany'],    ['F-','France'],
-                ['I-','Italy'],      ['EC-','Spain'],     ['SE-','Sweden'],
-                ['PH-','Netherlands'],['OO-','Belgium'],  ['LN-','Norway'],
-                ['OY-','Denmark'],   ['EI-','Ireland'],   ['TF-','Iceland'],
-                ['SP-','Poland'],    ['OE-','Austria'],   ['HB-','Switzerland'],
-                ['OK-','Czechia'],   ['OM-','Slovakia'],  ['LX-','Luxembourg'],
-                ['SX-','Greece'],    ['HA-','Hungary'],   ['YR-','Romania'],
-                ['LZ-','Bulgaria'],  ['9A-','Croatia'],   ['S5-','Slovenia'],
-                ['9H-','Malta'],     ['LY-','Lithuania'], ['YL-','Latvia'],
-                ['ES-','Estonia'],   ['OH-','Finland'],   ['YU-','Serbia'],
-                ['RA-','Russia'],    ['EW-','Belarus'],   ['UP-','Kazakhstan'],
-                ['UR-','Ukraine'],   ['4X-','Israel'],    ['TC-','Turkey'],
-                ['A6-','UAE'],       ['HZ-','Saudi Arabia'],['9V-','Singapore'],
-                ['VH-','Australia'], ['ZK-','New Zealand'],['ZS-','S. Africa'],
-                ['JA','Japan'],      ['HL','S. Korea'],   ['B-','China'],
-                ['VT-','India'],     ['SU-','Egypt'],     ['ET-','Ethiopia'],
-                ['CN-','Morocco'],   ['5Y-','Kenya'],     ['AP-','Pakistan'],
-                ['VN-','Vietnam'],   ['HS-','Thailand'],
-                ['N','USA'],         ['C-','Canada'],     ['XA-','Mexico'],
-                ['CC-','Chile'],     ['PT-','Brazil'],    ['LV-','Argentina'],
+                ['G-','United Kingdom'], ['D-','Germany'],       ['F-','France'],
+                ['I-','Italy'],          ['EC-','Spain'],        ['SE-','Sweden'],
+                ['PH-','Netherlands'],   ['OO-','Belgium'],      ['LN-','Norway'],
+                ['OY-','Denmark'],       ['EI-','Ireland'],      ['TF-','Iceland'],
+                ['SP-','Poland'],        ['OE-','Austria'],      ['HB-','Switzerland'],
+                ['OK-','Czech Republic'],['OM-','Slovakia'],     ['LX-','Luxembourg'],
+                ['SX-','Greece'],        ['HA-','Hungary'],      ['YR-','Romania'],
+                ['LZ-','Bulgaria'],      ['9A-','Croatia'],      ['S5-','Slovenia'],
+                ['9H-','Malta'],         ['LY-','Lithuania'],    ['YL-','Latvia'],
+                ['ES-','Estonia'],       ['OH-','Finland'],      ['YU-','Serbia'],
+                ['RA-','Russia'],        ['EW-','Belarus'],      ['UP-','Kazakhstan'],
+                ['UR-','Ukraine'],       ['4X-','Israel'],       ['TC-','Turkey'],
+                ['A6-','United Arab Emirates'],['HZ-','Saudi Arabia'],['9V-','Singapore'],
+                ['VH-','Australia'],     ['ZK-','New Zealand'],  ['ZS-','South Africa'],
+                ['JA','Japan'],          ['HL','South Korea'],   ['B-','China'],
+                ['VT-','India'],         ['SU-','Egypt'],        ['ET-','Ethiopia'],
+                ['CN-','Morocco'],       ['5Y-','Kenya'],        ['AP-','Pakistan'],
+                ['VN-','Vietnam'],       ['HS-','Thailand'],
+                ['N','United States'],   ['C-','Canada'],        ['XA-','Mexico'],
+                ['CC-','Chile'],         ['PT-','Brazil'],       ['LV-','Argentina'],
                 ['PP-','Brazil'],
             ];
             for (var pi = 0; pi < pfx.length; pi++) {
                 if (r.indexOf(pfx[pi][0]) === 0) return pfx[pi][1];
             }
         }
-        // ICAO hex block fallback for unregistered / no-reg aircraft
+        // ICAO hex block fallback — delegates to ICAO_RANGES binary search
+        // to avoid duplicating range boundaries and ensure name consistency.
         if (icao) {
-            var n = parseInt(icao, 16);
-            if (n >= 0x3C0000 && n <= 0x3FFFFF) return 'Germany';
-            if (n >= 0x400000 && n <= 0x43FFFF) return 'UK';
-            if (n >= 0x380000 && n <= 0x3BFFFF) return 'France';
-            if (n >= 0x340000 && n <= 0x37FFFF) return 'Spain';
-            if (n >= 0x300000 && n <= 0x33FFFF) return 'Italy';
-            if (n >= 0x4A0000 && n <= 0x4A7FFF) return 'Netherlands';
-            if (n >= 0x448000 && n <= 0x44FFFF) return 'Belgium';
-            if (n >= 0x4A8000 && n <= 0x4AFFFF) return 'Norway';
-            if (n >= 0x458000 && n <= 0x45FFFF) return 'Denmark';
-            if (n >= 0x480000 && n <= 0x487FFF) return 'Ireland';
-            if (n >= 0x4B0000 && n <= 0x4B7FFF) return 'Poland';
-            if (n >= 0x460000 && n <= 0x467FFF) return 'Finland';
-            if (n >= 0x440000 && n <= 0x447FFF) return 'Austria';
-            if (n >= 0x4C8000 && n <= 0x4CFFFF) return 'Switzerland';
-            if (n >= 0x488000 && n <= 0x48FFFF) return 'Iceland';
-            if (n >= 0x468000 && n <= 0x46FFFF) return 'Greece';
-            if (n >= 0x4B8000 && n <= 0x4BFFFF) return 'Portugal';
-            if (n >= 0x4C0000 && n <= 0x4C7FFF) return 'Romania';
-            if (n >= 0x450000 && n <= 0x457FFF) return 'Bulgaria';
-            if (n >= 0x470000 && n <= 0x477FFF) return 'Hungary';
-            if (n >= 0x478000 && n <= 0x47FFFF) return 'Croatia';
-            if (n >= 0x100000 && n <= 0x1FFFFF) return 'Russia';
-            if (n >= 0xA00000 && n <= 0xAFFFFF) return 'USA';
-            if (n >= 0xC00000 && n <= 0xC3FFFF) return 'Canada';
-            if (n >= 0x7C0000 && n <= 0x7FFFFF) return 'Australia';
-            if (n >= 0x800000 && n <= 0x83FFFF) return 'India';
-            if (n >= 0x680000 && n <= 0x6BFFFF) return 'Turkey';
-            if (n >= 0x898000 && n <= 0x8BFFFF) return 'Japan';
+            var rcInfo = getRegCountryFromIcao(icao);
+            if (rcInfo) return rcInfo.name;
         }
         return null;
     }
@@ -1182,11 +1176,12 @@
     }
 
     function _rfViewsOptionsHtml() {
+        _rfSyncActiveViewPointers(); // keep _activeViewId in sync with _activeViewIds before reading
         var h = '<option value="">Views</option>';
         for (var i = 0; i < _savedViews.length; i++) {
             var v = _savedViews[i];
             _rfEnsureViewShape(v);
-            h += '<option value="' + _rfEscAttr(v.id) + '"' + (_activeViewId === v.id ? ' selected' : '') + '>' + _rfEscText(v.name || ('View ' + (i + 1))) + '</option>';
+            h += '<option value="' + _rfEscAttr(v.id) + '"' + (_activeViewIds.indexOf(v.id) >= 0 ? ' selected' : '') + '>' + _rfEscText(v.name || ('View ' + (i + 1))) + '</option>';
         }
         return h;
     }
@@ -1232,7 +1227,7 @@
             if (cfg.fixedCenterLat === null || cfg.fixedCenterLon === null || cfg.fixedZoom === null) return;
             var fc = _rfMapCoordFromLonLat(cfg.fixedCenterLon, cfg.fixedCenterLat);
             if (!fc) return;
-            v.animate({ center: fc, zoom: cfg.fixedZoom, duration: forceNow ? 650 : 500 });
+            v.animate({ center: fc, zoom: cfg.fixedZoom, duration: _rfAnimDuration(forceNow ? 650 : 500) });
             return;
         }
         if (!cfg.autoCenter && !cfg.autoZoom) return;
@@ -1270,7 +1265,7 @@
                 if (fixedPts[fi][0] > maxX) maxX = fixedPts[fi][0];
                 if (fixedPts[fi][1] > maxY) maxY = fixedPts[fi][1];
             }
-            view.fit([minX, minY, maxX, maxY], { padding: [70, 70, 70, 70], maxZoom: 11, duration: forceNow ? 650 : 700 });
+            view.fit([minX, minY, maxX, maxY], { padding: [70, 70, 70, 70], maxZoom: 11, duration: _rfAnimDuration(forceNow ? 650 : 700) });
             return true;
         }
         if (fixedPts.length === 1) {
@@ -1332,7 +1327,7 @@
         if (!c) return;
         var v = m.getView();
         var targetZoom = useConfiguredZoom ? hc.zoom : Math.max(v.getZoom(), hc.zoom);
-        v.animate({ center: c, zoom: targetZoom, duration: 700 });
+        v.animate({ center: c, zoom: targetZoom, duration: _rfAnimDuration(700) });
     }
 
     function _rfScopeToggleHtml() {
@@ -1394,6 +1389,7 @@
     }
 
     function applyFilter() {
+        _rfDataDirty = true; // aircraft data maps need rebuilding after any filter change
         triggerRedraw();
         // Keep the main-map ring in sync with the active filter state
         if (_distanceZones.length > 0) {
@@ -1419,6 +1415,9 @@
         var chips = [];
         var activeViews = _rfGetActiveViews();
         if (activeViews.length) {
+            // When views are active they own the breadcrumb bar entirely.
+            // Tab-level filter chips are intentionally suppressed — views represent
+            // a complete saved state and mixing partial tab chips would be misleading.
             for (var avi = 0; avi < activeViews.length; avi++) {
                 var av = activeViews[avi];
                 _rfEnsureViewShape(av);
@@ -1693,8 +1692,8 @@
         }
         if (!listEl) return;
 
-        function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
-        function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
+        var esc = _rfEscText;
+        var escAttr = _rfEscAttr;
         if (hdrEl) hdrEl.innerHTML = '';
 
         // Live ICAOs currently present on map
@@ -1768,7 +1767,13 @@
             if (a.tag1 || a.tag2 || a.tag3) score += 6;
             return score;
         }
-        var filtered = _alertsDb.filter(matchesFacet).sort(function(a, b) { return alertScore(b) - alertScore(a); });
+        // Accumulate liveCount in the same pass to avoid a third scan of filtered later.
+        var liveCount = 0;
+        var filtered = _alertsDb.filter(function(a) {
+            var pass = matchesFacet(a);
+            if (pass && liveIcaos.has(a.icao)) liveCount++;
+            return pass;
+        }).sort(function(a, b) { return alertScore(b) - alertScore(a); });
         var displayed = filtered.slice(0, 300);
         var overflow = filtered.length > 300;
 
@@ -1805,7 +1810,7 @@
                         (a.cmpg ? '<button class="rf-al-pill rf-al-pill-cmpg" data-rf-action="facet" data-rf-field="cmpg" data-rf-value="' + escAttr(a.cmpg) + '">' + esc(a.cmpg) + '</button>' : '') +
                         (a.category ? '<button class="rf-al-pill rf-al-pill-cat" data-rf-action="facet" data-rf-field="category" data-rf-value="' + escAttr(a.category) + '">' + esc(a.category) + '</button>' : '') +
                         tags.map(function(t) { return '<button class="rf-al-pill rf-al-pill-tag" data-rf-action="facet" data-rf-field="tag" data-rf-value="' + escAttr(t) + '">' + esc(t) + '</button>'; }).join('') +
-                        (a.link ? '<a class="rf-al-pill rf-al-pill-link" href="' + escAttr(a.link) + '" target="_blank" rel="noopener">Intel</a>' : '') +
+                        (a.link && /^https?:\/\//i.test(a.link) ? '<a class="rf-al-pill rf-al-pill-link" href="' + escAttr(a.link) + '" target="_blank" rel="noopener">Intel</a>' : '') +
                     '</div>' +
                 '</div>';
             });
@@ -1852,7 +1857,7 @@
         };
 
         if (statusEl) {
-            var liveCount = filtered.filter(function(a) { return liveIcaos.has(a.icao); }).length;
+            // liveCount already accumulated during matchesFacet pass above
             var selCount = _alertsSelectedIcaos.size;
             statusEl.textContent = filtered.length + ' entries' +
                 (liveCount > 0 ? ' • ' + liveCount + ' live' : '') +
@@ -2115,7 +2120,7 @@
             return (_sumArrivals[b.icao] || 0) - (_sumArrivals[a.icao] || 0);
         }).slice(0, 8);
 
-        function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+        var esc = _rfEscText;
         function planeName(q) { return esc(q.flight || q.name || q.icao || '?'); }
         function planeReg(q)  { return esc(q.registration || ''); }
         function planeType(q) { return esc(q.typeLong || q.icaoType || ''); }
@@ -4606,7 +4611,6 @@
     window._rfSumFilterIcao = function (icao) {
         icao = (icao || '').toUpperCase();
         var adding = !_sumFilter.has(icao);
-        console.info('[RF] summary click single', icao, 'adding=', adding);
         if (adding) {
             _rfSaveMapView();
             _sumFilter.add(icao);
@@ -4623,7 +4627,6 @@
     // Primary handler for group filters: index into _sumClickData (avoids JSON-in-onclick).
     window._rfSumFilterIdx = function (idx) {
         var icaos = (_sumClickData[idx] || []);
-        console.info('[RF] summary click group idx=', idx, 'count=', icaos.length);
         _sumFilter.clear();
         if (icaos.length) {
             _rfSaveMapView();
@@ -4664,6 +4667,12 @@
 
     // ── Distance tab handlers ─────────────────────────────────────────────────
 
+    // Returns 0 if the user prefers reduced motion, otherwise returns ms.
+    function _rfAnimDuration(ms) {
+        try { if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 0; } catch(e) {}
+        return ms;
+    }
+
     // Safely get tar1090's OL map instance.
     // tar1090 stores it as `OLMap` (let-declared in script.js, shared global scope).
     // `g.map` does NOT exist — never use it.
@@ -4697,7 +4706,7 @@
     function _rfRestoreMapView() {
         if (!_mapViewSaved) return;
         var m = _rfOLMap();
-        if (m) m.getView().animate({ center: _mapViewSaved.center, zoom: _mapViewSaved.zoom, duration: 600 });
+        if (m) m.getView().animate({ center: _mapViewSaved.center, zoom: _mapViewSaved.zoom, duration: _rfAnimDuration(600) });
         _mapViewSaved = null;
     }
 
@@ -4730,28 +4739,21 @@
         return null;
     }
 
+    function _rfCallIfFn(name, arg) {
+        // Try global scope then window — covers both tar1090 let-declared and window-attached variants.
+        try { var f = (typeof window !== 'undefined' && typeof window[name] === 'function') ? window[name] : (typeof self !== 'undefined' && typeof self[name] === 'function') ? self[name] : null; if (f) f(arg); } catch (e) {}
+    }
     function _rfClearSelectedAircraftInTar1090() {
-        try { if (typeof selectPlaneByHex === 'function') { selectPlaneByHex(null); } } catch (e) {}
-        try { if (typeof selectPlaneByHex === 'function') { selectPlaneByHex(''); } } catch (e) {}
-        try { if (typeof selectPlaneByICAO === 'function') { selectPlaneByICAO(null); } } catch (e) {}
-        try { if (typeof selectPlaneByIcao === 'function') { selectPlaneByIcao(null); } } catch (e) {}
-        try { if (typeof setSelectedPlane === 'function') { setSelectedPlane(null); } } catch (e) {}
-        try { if (typeof setSelectedIcao === 'function') { setSelectedIcao(null); } } catch (e) {}
-        try { if (typeof selectPlane === 'function') { selectPlane(null); } } catch (e) {}
-        try { if (window && typeof window.selectPlaneByHex === 'function') { window.selectPlaneByHex(null); } } catch (e) {}
-        try { if (window && typeof window.selectPlaneByICAO === 'function') { window.selectPlaneByICAO(null); } } catch (e) {}
-        try { if (window && typeof window.selectPlaneByIcao === 'function') { window.selectPlaneByIcao(null); } } catch (e) {}
-        try { if (window && typeof window.setSelectedPlane === 'function') { window.setSelectedPlane(null); } } catch (e) {}
-        try { if (window && typeof window.setSelectedIcao === 'function') { window.setSelectedIcao(null); } } catch (e) {}
-        try { if (window && typeof window.selectPlane === 'function') { window.selectPlane(null); } } catch (e) {}
-        try { if (typeof SelectedPlane !== 'undefined') SelectedPlane = null; } catch (e) {}
-        try { if (typeof selectedPlane !== 'undefined') selectedPlane = null; } catch (e) {}
+        _rfCallIfFn('selectPlaneByHex', null);
+        _rfCallIfFn('selectPlaneByICAO', null);
+        _rfCallIfFn('selectPlaneByIcao', null);
+        _rfCallIfFn('setSelectedPlane', null);
+        _rfCallIfFn('setSelectedIcao', null);
+        _rfCallIfFn('selectPlane', null);
         try { if (window && window.hasOwnProperty('SelectedPlane')) window.SelectedPlane = null; } catch (e) {}
         try { if (window && window.hasOwnProperty('selectedPlane')) window.selectedPlane = null; } catch (e) {}
-        try { if (typeof refreshSelected === 'function') refreshSelected(); } catch (e) {}
-        try { if (typeof refreshSelectedPlane === 'function') refreshSelectedPlane(); } catch (e) {}
-        try { if (window && typeof window.refreshSelected === 'function') window.refreshSelected(); } catch (e) {}
-        try { if (window && typeof window.refreshSelectedPlane === 'function') window.refreshSelectedPlane(); } catch (e) {}
+        _rfCallIfFn('refreshSelected', undefined);
+        _rfCallIfFn('refreshSelectedPlane', undefined);
         // Fallback: if infobox is still open, click a close control to untoggle
         // tar1090's selected-aircraft info state.
         try {
@@ -4806,7 +4808,7 @@
         var view = m.getView();
         if (!view) { console.warn('[RF] pan skip: no map view'); return; }
         if (pts.length === 1) {
-            view.animate({ center: pts[0], zoom: Math.max(view.getZoom(), 10), duration: 600 });
+            view.animate({ center: pts[0], zoom: Math.max(view.getZoom(), 10), duration: _rfAnimDuration(600) });
         } else {
             // Avoid relying on ol.extent being present in all builds.
             var minX = pts[0][0], minY = pts[0][1], maxX = pts[0][0], maxY = pts[0][1];
@@ -4816,9 +4818,8 @@
                 if (pts[ei][0] > maxX) maxX = pts[ei][0];
                 if (pts[ei][1] > maxY) maxY = pts[ei][1];
             }
-            view.fit([minX, minY, maxX, maxY], { padding: [60, 60, 60, 60], maxZoom: 11, duration: 600 });
+            view.fit([minX, minY, maxX, maxY], { padding: [60, 60, 60, 60], maxZoom: 11, duration: _rfAnimDuration(600) });
         }
-        console.info('[RF] pan applied to', pts.length, 'aircraft');
     }
 
     // Save/restore helpers for global auto-fit (all tabs).
@@ -4832,7 +4833,7 @@
     function _rfRestoreAutoFitView() {
         if (!_autoFitSavedView) return;
         var m = _rfOLMap();
-        if (m && m.getView) m.getView().animate({ center: _autoFitSavedView.center, zoom: _autoFitSavedView.zoom, duration: 700 });
+        if (m && m.getView) m.getView().animate({ center: _autoFitSavedView.center, zoom: _autoFitSavedView.zoom, duration: _rfAnimDuration(700) });
         _autoFitSavedView = null;
     }
 
@@ -4922,7 +4923,7 @@
         } catch(e) {}
         try { if (typeof SiteLat !== 'undefined' && SiteLat) return { lat: +SiteLat, lon: +SiteLon }; } catch(e) {}
         try { if (typeof g !== 'undefined' && g.SitePosition && g.SitePosition.lat) return { lat: g.SitePosition.lat, lon: g.SitePosition.lng }; } catch(e) {}
-        return { lat: 53.07, lon: -0.77 };
+        return { lat: 0, lon: 0 };
     }
 
     function _rfLoadLeaflet(cb) {
@@ -5110,7 +5111,7 @@
                 }),
             }));
 
-            var lbl = zone.name.replace(/&amp;/g, '&') + '\n' + zone.radiusNm + ' NM';
+            var lbl = zone.name + '\n' + zone.radiusNm + ' NM';
             var lblFeat = new ol.Feature({ geometry: new ol.geom.Point(center) });
             lblFeat.set('_rfDist', true);
             lblFeat.setStyle(new ol.style.Style({
@@ -5156,14 +5157,13 @@
                         typeof layers.push === 'function') {
                         layers.push(_distOLLayer);
                         added = true;
-                        console.log('[RF] dist overlay: added via layers.push');
                     }
                 } catch(e1) { console.warn('[RF] layers.push failed:', e1); }
                 // Try OLMap.addLayer()
                 if (!added) {
                     try {
                         var m = _rfOLMap();
-                        if (m) { m.addLayer(_distOLLayer); added = true; console.log('[RF] dist overlay: added via OLMap.addLayer'); }
+                        if (m) { m.addLayer(_distOLLayer); added = true; }
                     } catch(e2) { console.warn('[RF] OLMap.addLayer failed:', e2); }
                 }
                 if (!added) {
@@ -5186,7 +5186,6 @@
                     if (typeof siteCircleFeatures !== 'undefined' && siteCircleFeatures) {
                         _rfRemoveDistFeatures(siteCircleFeatures);
                         src = siteCircleFeatures;
-                        console.log('[RF] dist overlay: using siteCircleFeatures fallback');
                     }
                 } catch(e3) { console.warn('[RF] siteCircleFeatures fallback failed:', e3); }
             }
@@ -5226,7 +5225,7 @@
                 if (c[0] + r > maxX) maxX = c[0] + r;
                 if (c[1] + r > maxY) maxY = c[1] + r;
             });
-            map.getView().fit([minX, minY, maxX, maxY], { duration: 600, padding: [30, 30, 30, 30] });
+            map.getView().fit([minX, minY, maxX, maxY], { duration: _rfAnimDuration(600), padding: [30, 30, 30, 30] });
         } catch(e) {}
     };
 
@@ -5829,13 +5828,13 @@
             var liveSet = new Set();
             planes.forEach(function(p) { if (p.icao) liveSet.add((p.icao + '').toUpperCase()); });
             var alertCount = _alertsDb ? _alertsDb.length : 0;
-            var matches = 0, sample = [];
+            var matches = 0, alertSample = [];
             if (_alertsDb) {
                 _alertsDb.forEach(function(a) {
                     var ic = (a.icao || '').toUpperCase();
                     if (liveSet.has(ic)) {
                         matches++;
-                        if (sample.length < 12) sample.push(ic);
+                        if (alertSample.length < 12) alertSample.push(ic);
                     }
                 });
             }
@@ -5845,7 +5844,7 @@
                 error: _alertsError,
                 rows: alertCount,
                 liveMatches: matches,
-                sampleMatches: sample
+                sampleMatches: alertSample
             });
             console.log('[RF] storage status:', {
                 localStorageOk: _rfLocalStorageOk,

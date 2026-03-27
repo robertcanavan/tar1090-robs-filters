@@ -140,12 +140,20 @@ Save your current filter state as a named preset and recall it in one click.
 
 **Saving a view** — set up any combination of filters across any tabs, then click **Save current as new view**. The view captures all active tab filters, the distance zones, and your panel scope.
 
-**Applying a view** — click the view name in the list, or use the quick-pick dropdown in the panel header next to the scope toggle. While a view is active, a chip appears in the breadcrumb bar showing the view name and map mode. Click the X on the chip or the **Turn Off** button in the dropdown to deactivate the view without clearing the underlying filters.
+**Applying a view** — click **Apply** on a view row to replace your current filters with that view's saved state. The active view appears as a chip in the breadcrumb bar showing the name and map mode.
+
+**Adding views** — click **Add** to stack an additional view on top of the current active set without replacing existing filters. The badge in the header shows how many views are active. Click **Remove** on a view to pull it out of the active set.
+
+**Pre-view state** — before any view is applied, your current filter state is snapshotted automatically. Clearing all active views restores that snapshot so you get back to where you were.
+
+**Quick-pick** — the checkbox list in the header dropdown lets you tick multiple views and apply them all at once with the Apply button.
 
 **Map behavior** — each view has optional map controls:
 - **Off** — apply filters only, leave the map position alone
 - **Dynamic** — after applying, auto-fit the map to show all matched aircraft. Updates live as the filtered set changes.
 - **Fixed** — snap the map to a saved lat/lon/zoom. Useful for monitoring a specific area.
+
+When multiple views with Fixed map positions are active, the map fits a bounding box around all their fixed points.
 
 **Auto center / Auto zoom** — independent toggles within Dynamic mode. You can auto-zoom without auto-centering if you want to keep the current pan position.
 

@@ -74,7 +74,30 @@
     var _tabVisibility = { summary: true, airports: true, countries: true, operators: true, aircraft: true, views: true, alerts: true, distance: true };
     var _savedViews = [];
     var _activeViewId = '';
+    var _activeViewIds = [];
     var _rfQuickSelectedViewId = '';
+    var _rfPreViewState = null;
+
+    function _rfSyncActiveViewPointers() {
+        var keep = [];
+        for (var i = 0; i < _activeViewIds.length; i++) {
+            var id = _activeViewIds[i];
+            if (id && _rfFindViewById(id)) keep.push(id);
+        }
+        _activeViewIds = keep;
+        _activeViewId = _activeViewIds.length ? _activeViewIds[0] : '';
+    }
+
+    function _rfCapturePreViewStateIfNeeded() {
+        if (_rfPreViewState) return;
+        _rfPreViewState = _rfCaptureViewState();
+    }
+
+    function _rfRestorePreViewStateIfAny() {
+        if (!_rfPreViewState) return;
+        _rfApplyViewState(_rfPreViewState);
+        _rfPreViewState = null;
+    }
 
     // ── Summary section visibility (persisted) ────────────────────────────────
     var SUMMARY_SETTINGS_KEY = 'rf_sum_settings_v1';
@@ -1175,9 +1198,28 @@
         return null;
     }
 
+    function _rfGetActiveViews() {
+        _rfSyncActiveViewPointers();
+        var out = [];
+        for (var i = 0; i < _activeViewIds.length; i++) {
+            var v = _rfFindViewById(_activeViewIds[i]);
+            if (v) out.push(v);
+        }
+        return out;
+    }
+
     function _rfGetActiveView() {
-        if (!_activeViewId) return null;
-        return _rfFindViewById(_activeViewId);
+        var views = _rfGetActiveViews();
+        return views.length ? views[0] : null;
+    }
+
+    function _rfAnyActiveViewMapEnabled() {
+        var avs = _rfGetActiveViews();
+        for (var i = 0; i < avs.length; i++) {
+            _rfEnsureViewShape(avs[i]);
+            if (avs[i].map && avs[i].map.enabled) return true;
+        }
+        return false;
     }
 
     function _rfApplyMapBehaviorConfig(mapCfg, forceNow) {
@@ -1199,6 +1241,48 @@
             autoZoom: cfg.autoZoom,
             forceNow: !!forceNow,
         });
+    }
+
+    function _rfApplyActiveViewsMapBehavior(forceNow) {
+        var avs = _rfGetActiveViews();
+        if (!avs.length) return false;
+        var m = _rfOLMap();
+        if (!m || !m.getView) return false;
+        var view = m.getView();
+        var mapEnabled = [];
+        var fixedPts = [];
+        for (var i = 0; i < avs.length; i++) {
+            _rfEnsureViewShape(avs[i]);
+            var cfg = _rfNormalizeViewMap(avs[i].map);
+            if (!cfg.enabled) continue;
+            mapEnabled.push(cfg);
+            if (cfg.mode === 'fixed' && cfg.fixedCenterLat !== null && cfg.fixedCenterLon !== null) {
+                var mc = _rfMapCoordFromLonLat(cfg.fixedCenterLon, cfg.fixedCenterLat);
+                if (mc) fixedPts.push(mc);
+            }
+        }
+        if (!mapEnabled.length) return true;
+        if (fixedPts.length >= 2) {
+            var minX = fixedPts[0][0], minY = fixedPts[0][1], maxX = fixedPts[0][0], maxY = fixedPts[0][1];
+            for (var fi = 1; fi < fixedPts.length; fi++) {
+                if (fixedPts[fi][0] < minX) minX = fixedPts[fi][0];
+                if (fixedPts[fi][1] < minY) minY = fixedPts[fi][1];
+                if (fixedPts[fi][0] > maxX) maxX = fixedPts[fi][0];
+                if (fixedPts[fi][1] > maxY) maxY = fixedPts[fi][1];
+            }
+            view.fit([minX, minY, maxX, maxY], { padding: [70, 70, 70, 70], maxZoom: 11, duration: forceNow ? 650 : 700 });
+            return true;
+        }
+        if (fixedPts.length === 1) {
+            var z = view.getZoom();
+            if (mapEnabled[0].mode === 'fixed' && typeof mapEnabled[0].fixedZoom === 'number' && !isNaN(mapEnabled[0].fixedZoom)) {
+                z = Math.max(2, Math.min(19, mapEnabled[0].fixedZoom));
+            }
+            view.animate({ center: fixedPts[0], zoom: z, duration: forceNow ? 650 : 700 });
+            return true;
+        }
+        _rfApplyMapBehaviorConfig(mapEnabled[0], !!forceNow);
+        return true;
     }
 
     function _rfDetectHomePos() {
@@ -1276,31 +1360,36 @@
     function _rfRenderViewQuickMenu() {
         var el = document.getElementById('rf-view-quick-menu');
         if (!el) return;
-        var av = _rfGetActiveView();
+        var avs = _rfGetActiveViews();
         var badge = '<div class="rf-active-view-badge-empty">No active view</div>';
-        if (av) {
+        if (avs.length) {
+            var av = avs[0];
             _rfEnsureViewShape(av);
             var modeLbl = !av.map.enabled ? 'Map Off' : (av.map.mode === 'fixed' ? 'Map Fixed' : 'Map Dynamic');
-            badge = '<div class="rf-active-view-badge" title="Active view: ' + _rfEscAttr(av.name || '') + '">' +
+            badge = '<div class="rf-active-view-badge" title="' + (avs.length > 1 ? ('Active views: ' + avs.length) : ('Active view: ' + _rfEscAttr(av.name || ''))) + '">' +
                 '<span class="rf-active-view-name">' + _rfEscText(av.name || 'View') + '</span>' +
-                '<span class="rf-active-view-mode">' + modeLbl + '</span></div>';
+                '<span class="rf-active-view-mode">' + (avs.length > 1 ? ('+' + (avs.length - 1) + ' more') : modeLbl) + '</span></div>';
         }
         if (!_rfQuickSelectedViewId) _rfQuickSelectedViewId = _activeViewId || '';
-        var opt = '<option value="">Select view...</option>';
+        var list = '';
         for (var i = 0; i < _savedViews.length; i++) {
             var v = _savedViews[i];
             _rfEnsureViewShape(v);
-            opt += '<option value="' + _rfEscAttr(v.id) + '"' + (_rfQuickSelectedViewId === v.id ? ' selected' : '') + '>' + _rfEscText(v.name || ('View ' + (i + 1))) + '</option>';
+            var checked = (_activeViewIds.indexOf(v.id) >= 0 || _rfQuickSelectedViewId === v.id) ? ' checked' : '';
+            list += '<label class="rf-view-quick-item">' +
+                '<input type="checkbox" class="rf-view-quick-check" value="' + _rfEscAttr(v.id) + '"' + checked + ' onchange="window._rfViewsQuickPick(this)">' +
+                '<span>' + _rfEscText(v.name || ('View ' + (i + 1))) + '</span>' +
+            '</label>';
         }
         el.innerHTML =
             '<div class="rf-view-quick-head">Views</div>' +
             badge +
-            '<select class="rf-views-select rf-views-select-compact" onchange="window._rfViewsQuickPick(this.value)">' + opt + '</select>' +
+            (_savedViews.length ? ('<div class="rf-view-quick-list">' + list + '</div>') : '<div class="rf-active-view-badge-empty">No saved views yet</div>') +
             '<div class="rf-view-quick-actions">' +
-            '<button class="rf-cat-btn" onclick="window._rfViewsApplyQuick()">Apply</button>' +
-            '<button class="rf-cat-btn" onclick="window._rfViewsClearActive()">Turn Off</button>' +
-            '<button class="rf-cat-btn" onclick="window._rfViewsSavePrompt()">Save Current</button>' +
-            '<button class="rf-cat-btn" onclick="window._rfSwitchTab(\'views\');window._rfToggleViewQuickMenu(false)">Manage</button>' +
+            '<button class="rf-cat-btn" title="Apply selected views" onclick="window._rfViewsApplyQuick()">\u25B6</button>' +
+            '<button class="rf-cat-btn" title="Turn off all active views" onclick="window._rfViewsClearActive()">\u23FB</button>' +
+            '<button class="rf-cat-btn" title="Save current filters as a view" onclick="window._rfViewsSavePrompt()">\uD83D\uDCBE</button>' +
+            '<button class="rf-cat-btn" title="Open Views tab" onclick="window._rfSwitchTab(\'views\');window._rfToggleViewQuickMenu(false)">\u2699</button>' +
             '</div>';
     }
 
@@ -1313,9 +1402,7 @@
             _rfClearDistOnMainMap();
         }
         // Map behavior: active view controls auto-center/zoom, else fallback to legacy behavior.
-        var av = _rfGetActiveView();
-        if (av && av.map) _rfApplyMapBehaviorConfig(av.map, true);
-        else _rfAutoFitFilteredPlanes();
+        if (!_rfApplyActiveViewsMapBehavior(true)) _rfAutoFitFilteredPlanes();
         _rfRenderScopeHeader();
     }
 
@@ -1330,6 +1417,24 @@
         if (!el) return;
 
         var chips = [];
+        var activeViews = _rfGetActiveViews();
+        if (activeViews.length) {
+            for (var avi = 0; avi < activeViews.length; avi++) {
+                var av = activeViews[avi];
+                _rfEnsureViewShape(av);
+                var avMode = !av.map.enabled ? 'Map Off' : (av.map.mode === 'fixed' ? 'Map Fixed' : 'Map Dynamic');
+                chips.push(
+                    '<div class="rf-chip rf-chip-active" onclick="window._rfSwitchTab(\'views\')" title="Active view. Click to open Views tab">' +
+                    '<span class="rf-chip-label">View</span>' +
+                    '<span class="rf-chip-items">' + _rfEscText(av.name || 'Unnamed') + ' • ' + avMode + '</span>' +
+                    '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfViewsRemoveActive(\'' + _rfEscAttr(av.id) + '\')">&#x2715;</button>' +
+                    '</div>'
+                );
+            }
+            el.style.display = 'flex';
+            el.innerHTML = chips.join('');
+            return;
+        }
         var tabs  = Object.keys(state.tabState);
         for (var i = 0; i < tabs.length; i++) {
             var tabName = tabs[i];
@@ -1434,20 +1539,6 @@
                 '<span class="rf-chip-label">Summary</span>' +
                 '<span class="rf-chip-items">' + sfLabel.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>' +
                 '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfClearSumFilter()">&#x2715;</button>' +
-                '</div>'
-            );
-        }
-
-        // Active View chip (easy off switch)
-        var avc = _rfGetActiveView();
-        if (avc) {
-            _rfEnsureViewShape(avc);
-            var avMode = !avc.map.enabled ? 'Map Off' : (avc.map.mode === 'fixed' ? 'Map Fixed' : 'Map Dynamic');
-            chips.push(
-                '<div class="rf-chip rf-chip-active" onclick="window._rfSwitchTab(\'views\')" title="Active view. Click to open Views tab">' +
-                '<span class="rf-chip-label">View</span>' +
-                '<span class="rf-chip-items">' + _rfEscText(avc.name || 'Unnamed') + ' • ' + avMode + '</span>' +
-                '<button class="rf-chip-x" onclick="event.stopPropagation();window._rfViewsClearActive()">&#x2715;</button>' +
                 '</div>'
             );
         }
@@ -2942,11 +3033,17 @@
             var html = '<div class="rf-settings-content">' +
                 '<div class="rf-set-group">' +
                 '<div class="rf-set-group-title">Saved Views</div>' +
-                '<div class="rf-set-group-desc">Capture your current filters as reusable presets. Views are also available from the header dropdown next to map scope.</div>' +
+                '<div class="rf-set-group-desc">A view saves your filters and optional map behavior. Use it as a one-click preset.</div>' +
+                '<div class="rf-set-group-desc" style="margin-top:6px">' +
+                    '<strong>Apply (replace):</strong> replaces your current filters with this view.<br>' +
+                    '<strong>Add:</strong> keeps current filters and adds this view to active map control.<br>' +
+                    '<strong>Remove / Turn off all:</strong> stops active view control and restores what you had before applying views.' +
+                '</div>' +
                 '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">' +
                 '<button class="rf-cat-btn" onclick="window._rfViewsSavePrompt()">Save current as new view</button>' +
-                (_activeViewId ? '<button class="rf-cat-btn" onclick="window._rfViewsRename(\'' + _rfEscAttr(_activeViewId) + '\')">Rename active view</button>' : '') +
-                (_activeViewId ? '<button class="rf-cat-btn" onclick="window._rfViewsDeleteActive()">Delete active view</button>' : '') +
+                (_activeViewIds.length ? '<button class="rf-cat-btn" onclick="window._rfViewsClearActive()">Turn off all active views</button>' : '') +
+                (_activeViewId ? '<button class="rf-cat-btn" onclick="window._rfViewsRename(\'' + _rfEscAttr(_activeViewId) + '\')">Rename first active view</button>' : '') +
+                (_activeViewId ? '<button class="rf-cat-btn" onclick="window._rfViewsDeleteActive()">Delete first active view</button>' : '') +
                 '</div>' +
                 '</div>';
             if (_savedViews.length === 0) {
@@ -2956,7 +3053,7 @@
                 for (var i = 0; i < _savedViews.length; i++) {
                     var v = _savedViews[i];
                     _rfEnsureViewShape(v);
-                    var isActive = _activeViewId === v.id;
+                    var isActive = _activeViewIds.indexOf(v.id) >= 0;
                     var when = v.updatedAt ? new Date(v.updatedAt).toLocaleString() : '';
                     var mapModeLbl = !v.map.enabled ? 'Off' : (v.map.mode === 'fixed' ? 'Fixed' : 'Dynamic');
                     var fixedLat = (typeof v.map.fixedCenterLat === 'number') ? v.map.fixedCenterLat.toFixed(5) : '';
@@ -2965,31 +3062,36 @@
                     html += '<div class="rf-view-item' + (isActive ? ' rf-view-item-active' : '') + '">' +
                         '<div class="rf-view-item-name">' + _rfEscText(v.name || ('View ' + (i + 1))) + '</div>' +
                         '<div class="rf-view-item-meta">' + _rfEscText(when) + ' • Map: ' + mapModeLbl + '</div>' +
+                        '<div class="rf-set-group-desc" style="margin:6px 0 8px 0">' +
+                            '<strong>Map behavior</strong> controls what the map does while this view is active.' +
+                        '</div>' +
                         '<div class="rf-view-map-cfg">' +
-                            '<label class="rf-set-toggle"><input type="checkbox"' + (v.map.enabled ? ' checked' : '') + ' onchange="window._rfViewsSetMapEnabled(\'' + _rfEscAttr(v.id) + '\',this.checked)"><div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Enable map behavior</div></div></label>' +
+                            '<label class="rf-set-toggle"><input type="checkbox"' + (v.map.enabled ? ' checked' : '') + ' onchange="window._rfViewsSetMapEnabled(\'' + _rfEscAttr(v.id) + '\',this.checked)"><div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Enable map behavior</div><div class="rf-set-toggle-desc">When off, this view changes filters only and does not move the map.</div></div></label>' +
                             '<div class="rf-view-inline-row">' +
-                                '<button class="rf-cat-btn' + (!v.map.enabled ? ' rf-cat-active' : '') + '" onclick="window._rfViewsSetMapMode(\'' + _rfEscAttr(v.id) + '\',\'off\')">Off</button>' +
-                                '<button class="rf-cat-btn' + (v.map.enabled && v.map.mode === 'dynamic' ? ' rf-cat-active' : '') + '" onclick="window._rfViewsSetMapMode(\'' + _rfEscAttr(v.id) + '\',\'dynamic\')">Dynamic</button>' +
-                                '<button class="rf-cat-btn' + (v.map.enabled && v.map.mode === 'fixed' ? ' rf-cat-active' : '') + '" onclick="window._rfViewsSetMapMode(\'' + _rfEscAttr(v.id) + '\',\'fixed\')">Fixed</button>' +
+                                '<button class="rf-cat-btn' + (!v.map.enabled ? ' rf-cat-active' : '') + '" title="No automatic map movement for this view" onclick="window._rfViewsSetMapMode(\'' + _rfEscAttr(v.id) + '\',\'off\')">Off</button>' +
+                                '<button class="rf-cat-btn' + (v.map.enabled && v.map.mode === 'dynamic' ? ' rf-cat-active' : '') + '" title="Automatically follows aircraft that match current filters" onclick="window._rfViewsSetMapMode(\'' + _rfEscAttr(v.id) + '\',\'dynamic\')">Dynamic</button>' +
+                                '<button class="rf-cat-btn' + (v.map.enabled && v.map.mode === 'fixed' ? ' rf-cat-active' : '') + '" title="Always goes to a saved location and zoom" onclick="window._rfViewsSetMapMode(\'' + _rfEscAttr(v.id) + '\',\'fixed\')">Fixed</button>' +
+                            '</div>' +
+                            '<div class="rf-set-group-desc" style="margin:4px 0 6px 0">Mode guide: <strong>Dynamic</strong> follows filtered traffic, <strong>Fixed</strong> locks to saved lat/lon/zoom, <strong>Off</strong> leaves map unchanged.</div>' +
+                            '<div class="rf-view-inline-row">' +
+                                '<label class="rf-set-toggle"><input type="checkbox"' + (v.map.autoCenter ? ' checked' : '') + ' onchange="window._rfViewsSetMapToggle(\'' + _rfEscAttr(v.id) + '\',\'autoCenter\',this.checked)"><div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Auto center</div><div class="rf-set-toggle-desc">Keeps relevant aircraft area in the middle of the map.</div></div></label>' +
+                                '<label class="rf-set-toggle"><input type="checkbox"' + (v.map.autoZoom ? ' checked' : '') + ' onchange="window._rfViewsSetMapToggle(\'' + _rfEscAttr(v.id) + '\',\'autoZoom\',this.checked)"><div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Auto zoom</div><div class="rf-set-toggle-desc">Adjusts zoom to keep relevant aircraft in frame.</div></div></label>' +
                             '</div>' +
                             '<div class="rf-view-inline-row">' +
-                                '<label class="rf-set-toggle"><input type="checkbox"' + (v.map.autoCenter ? ' checked' : '') + ' onchange="window._rfViewsSetMapToggle(\'' + _rfEscAttr(v.id) + '\',\'autoCenter\',this.checked)"><div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Auto center</div></div></label>' +
-                                '<label class="rf-set-toggle"><input type="checkbox"' + (v.map.autoZoom ? ' checked' : '') + ' onchange="window._rfViewsSetMapToggle(\'' + _rfEscAttr(v.id) + '\',\'autoZoom\',this.checked)"><div class="rf-set-toggle-body"><div class="rf-set-toggle-label">Auto zoom</div></div></label>' +
+                                '<button class="rf-cat-btn" title="Copy the current map center and zoom into this view" onclick="window._rfViewsUseCurrentMap(\'' + _rfEscAttr(v.id) + '\')">Use current map</button>' +
                             '</div>' +
                             '<div class="rf-view-inline-row">' +
-                                '<button class="rf-cat-btn" onclick="window._rfViewsUseCurrentMap(\'' + _rfEscAttr(v.id) + '\')">Use current map</button>' +
-                            '</div>' +
-                            '<div class="rf-view-inline-row">' +
-                                '<input class="rf-dist-input rf-dist-small" type="number" step="0.00001" min="-90" max="90" value="' + _rfEscAttr(fixedLat) + '" placeholder="Lat" oninput="window._rfViewsSetFixedValue(\'' + _rfEscAttr(v.id) + '\',\'lat\',this.value)">' +
-                                '<input class="rf-dist-input rf-dist-small" type="number" step="0.00001" min="-180" max="180" value="' + _rfEscAttr(fixedLon) + '" placeholder="Lon" oninput="window._rfViewsSetFixedValue(\'' + _rfEscAttr(v.id) + '\',\'lon\',this.value)">' +
-                                '<input class="rf-dist-input rf-dist-small" type="number" step="1" min="2" max="19" value="' + _rfEscAttr(fixedZoom) + '" placeholder="Zoom" oninput="window._rfViewsSetFixedValue(\'' + _rfEscAttr(v.id) + '\',\'zoom\',this.value)">' +
+                                '<input class="rf-dist-input rf-dist-small" type="number" step="0.00001" min="-90" max="90" value="' + _rfEscAttr(fixedLat) + '" placeholder="Lat (center)" title="Latitude for Fixed mode center point" oninput="window._rfViewsSetFixedValue(\'' + _rfEscAttr(v.id) + '\',\'lat\',this.value)">' +
+                                '<input class="rf-dist-input rf-dist-small" type="number" step="0.00001" min="-180" max="180" value="' + _rfEscAttr(fixedLon) + '" placeholder="Lon (center)" title="Longitude for Fixed mode center point" oninput="window._rfViewsSetFixedValue(\'' + _rfEscAttr(v.id) + '\',\'lon\',this.value)">' +
+                                '<input class="rf-dist-input rf-dist-small" type="number" step="1" min="2" max="19" value="' + _rfEscAttr(fixedZoom) + '" placeholder="Zoom (2-19)" title="Zoom level used by Fixed mode (2 wide area, 19 very close)" oninput="window._rfViewsSetFixedValue(\'' + _rfEscAttr(v.id) + '\',\'zoom\',this.value)">' +
                             '</div>' +
                         '</div>' +
                         '<div class="rf-view-item-actions">' +
-                        '<button class="rf-cat-btn" onclick="window._rfViewsApply(\'' + _rfEscAttr(v.id) + '\')">Apply</button>' +
-                        '<button class="rf-cat-btn" onclick="window._rfViewsRename(\'' + _rfEscAttr(v.id) + '\')">Rename</button>' +
-                        '<button class="rf-cat-btn" onclick="window._rfViewsSavePrompt(\'' + _rfEscAttr(v.id) + '\')">Overwrite</button>' +
-                        '<button class="rf-cat-btn" onclick="window._rfViewsDelete(\'' + _rfEscAttr(v.id) + '\')">Delete</button>' +
+                        '<button class="rf-cat-btn" title="Apply this view (replace current filters)" onclick="window._rfViewsApply(\'' + _rfEscAttr(v.id) + '\')">\u25B6</button>' +
+                        (!isActive ? '<button class="rf-cat-btn" title="Add this view to active view control" onclick="window._rfViewsApply(\'' + _rfEscAttr(v.id) + '\',true)">\u2795</button>' : '<button class="rf-cat-btn" title="Remove this view from active view control" onclick="window._rfViewsRemoveActive(\'' + _rfEscAttr(v.id) + '\')">\u2796</button>') +
+                        '<button class="rf-cat-btn" title="Rename this view" onclick="window._rfViewsRename(\'' + _rfEscAttr(v.id) + '\')">\u270F</button>' +
+                        '<button class="rf-cat-btn" title="Overwrite this view with current filters/map" onclick="window._rfViewsSavePrompt(\'' + _rfEscAttr(v.id) + '\')">\uD83D\uDCBE</button>' +
+                        '<button class="rf-cat-btn" title="Delete this view" onclick="window._rfViewsDelete(\'' + _rfEscAttr(v.id) + '\')">\uD83D\uDDD1</button>' +
                         '</div></div>';
                 }
                 html += '</div>';
@@ -3518,6 +3620,8 @@
         _distanceMode = 'inside';
         _savedViews = [];
         _activeViewId = '';
+        _activeViewIds = [];
+        _rfPreViewState = null;
 
         _rfProbeStorage();
         applyPanelMode();
@@ -3936,6 +4040,7 @@
             _savedViews = snap.views;
             for (var vi = 0; vi < _savedViews.length; vi++) _rfEnsureViewShape(_savedViews[vi]);
         }
+        _rfSyncActiveViewPointers();
         return true;
     }
 
@@ -4247,12 +4352,31 @@
         if (!id) return;
         window._rfViewsApply(id);
     };
-    window._rfViewsQuickPick = function (id) {
-        _rfQuickSelectedViewId = id || '';
+    function _rfViewsQuickSelectedIds() {
+        var all = document.querySelectorAll('#rf-view-quick-menu input.rf-view-quick-check');
+        if (!all || !all.length) return [];
+        var selected = [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].checked && all[i].value) selected.push(all[i].value);
+        }
+        return selected;
+    }
+
+    window._rfViewsQuickPick = function (elOrId) {
+        if (elOrId && typeof elOrId.checked === 'boolean') {
+            var ids = _rfViewsQuickSelectedIds();
+            _rfQuickSelectedViewId = ids.length ? ids[0] : '';
+            return;
+        }
+        _rfQuickSelectedViewId = elOrId || '';
     };
     window._rfViewsApplyQuick = function () {
-        if (!_rfQuickSelectedViewId) return;
-        window._rfViewsApply(_rfQuickSelectedViewId);
+        var selected = _rfViewsQuickSelectedIds();
+        if (!selected.length && _rfQuickSelectedViewId) selected = [_rfQuickSelectedViewId];
+        if (!selected.length) return;
+        window._rfViewsApply(selected[0], false);
+        for (var si = 1; si < selected.length; si++) window._rfViewsApply(selected[si], true);
+        _rfSyncActiveViewPointers();
         window._rfToggleViewQuickMenu(false);
     };
     window._rfToggleViewQuickMenu = function (force) {
@@ -4265,12 +4389,18 @@
         if (show) _rfRenderViewQuickMenu();
     };
 
-    window._rfViewsApply = function (id) {
+    window._rfViewsApply = function (id, appendOnly) {
         var v = _rfFindViewById(id);
         if (!v) return;
         _rfEnsureViewShape(v);
-        if (!_rfApplyViewState(v.state || {})) return;
-        _activeViewId = id;
+        var hasActive = _activeViewIds.length > 0;
+        if (!appendOnly || !hasActive) {
+            _rfCapturePreViewStateIfNeeded();
+            if (!_rfApplyViewState(v.state || {})) return;
+        }
+        if (!appendOnly) _activeViewIds = [];
+        if (_activeViewIds.indexOf(id) < 0) _activeViewIds.push(id);
+        _rfSyncActiveViewPointers();
         // "yes sounds good": switch to Summary when applying a view
         state.activeTab = 'summary';
         applyFilter();
@@ -4315,7 +4445,8 @@
                 existing.map.fixedZoom = mNow.zoom;
             }
             existing.updatedAt = now;
-            _activeViewId = existing.id;
+            if (_activeViewIds.indexOf(existing.id) < 0) _activeViewIds.push(existing.id);
+            _rfSyncActiveViewPointers();
         } else {
             var id = 'view_' + now + '_' + Math.random().toString(36).slice(2, 8);
             var mapCfg = _rfDefaultViewMap();
@@ -4325,7 +4456,8 @@
                 mapCfg.fixedZoom = mNow.zoom;
             }
             _savedViews.push({ id: id, name: name, state: stateSnap, map: mapCfg, createdAt: now, updatedAt: now });
-            _activeViewId = id;
+            _activeViewIds = [id];
+            _rfSyncActiveViewPointers();
         }
         _rfPersistViews();
         _rfRenderScopeHeader();
@@ -4341,7 +4473,9 @@
         var nm = _savedViews[ix].name || 'this view';
         if (!confirm('Delete view "' + nm + '"?')) return;
         _savedViews.splice(ix, 1);
-        if (_activeViewId === id) _activeViewId = '';
+        _activeViewIds = _activeViewIds.filter(function (x) { return x !== id; });
+        _rfSyncActiveViewPointers();
+        if (_activeViewIds.length === 0) _rfRestorePreViewStateIfAny();
         _rfPersistViews();
         _rfRenderScopeHeader();
         buildPanel();
@@ -4352,8 +4486,20 @@
         window._rfViewsDelete(_activeViewId);
     };
 
+    window._rfViewsRemoveActive = function (id) {
+        _activeViewIds = _activeViewIds.filter(function (x) { return x !== id; });
+        _rfSyncActiveViewPointers();
+        if (_activeViewIds.length === 0) _rfRestorePreViewStateIfAny();
+        _rfRenderScopeHeader();
+        applyFilter();
+        if (state.panelOpen) buildPanel();
+        window._rfToggleViewQuickMenu(false);
+    };
+
     window._rfViewsClearActive = function () {
-        _activeViewId = '';
+        _activeViewIds = [];
+        _rfSyncActiveViewPointers();
+        _rfRestorePreViewStateIfAny();
         _rfQuickSelectedViewId = '';
         _rfRenderScopeHeader();
         applyFilter();
@@ -4368,7 +4514,7 @@
         v.map.enabled = !!on;
         v.updatedAt = Date.now();
         _rfPersistViews();
-        if (_activeViewId === id) _rfApplyMapBehaviorConfig(v.map, true);
+        if (_activeViewIds.indexOf(id) >= 0) _rfApplyActiveViewsMapBehavior(true);
         if (state.activeTab === 'views') buildPanel();
     };
 
@@ -4383,7 +4529,7 @@
         }
         v.updatedAt = Date.now();
         _rfPersistViews();
-        if (_activeViewId === id) _rfApplyMapBehaviorConfig(v.map, true);
+        if (_activeViewIds.indexOf(id) >= 0) _rfApplyActiveViewsMapBehavior(true);
         if (state.activeTab === 'views') buildPanel();
     };
 
@@ -4395,7 +4541,7 @@
         v.map[key] = !!on;
         v.updatedAt = Date.now();
         _rfPersistViews();
-        if (_activeViewId === id) _rfApplyMapBehaviorConfig(v.map, true);
+        if (_activeViewIds.indexOf(id) >= 0) _rfApplyActiveViewsMapBehavior(true);
     };
 
     window._rfViewsUseCurrentMap = function (id) {
@@ -4642,6 +4788,7 @@
     // Pan / fit the OL map to show the given array of ICAOs at their current positions.
     function _rfPanToIcaos(icaos) {
         if (!icaos || !icaos.length) return;
+        if (_rfAnyActiveViewMapEnabled()) return;
         var m = _rfOLMap();
         if (!m || !g || !g.planesOrdered) { console.warn('[RF] pan skip: map/planes unavailable'); return; }
         var icaoSet = new Set(icaos.map(function(ic){ return (ic || '').toUpperCase(); }));
@@ -5619,10 +5766,7 @@
                 }
             }
             // Keep active view map behavior synced as aircraft move.
-            var avTick = _rfGetActiveView();
-            if (avTick && avTick.map && avTick.map.enabled) {
-                _rfApplyMapBehaviorConfig(avTick.map, false);
-            }
+            _rfApplyActiveViewsMapBehavior(false);
             if (isFilterActive()) triggerRedraw();
         }, 3000);
     }

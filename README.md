@@ -65,7 +65,7 @@ Opens by default. A live dashboard of everything on screen — no filtering need
 - Military aircraft — click the header to filter all military on the map
 - Low altitude airborne aircraft that look unusual
 
-Each row in Attention shows the aircraft's distance from your receiver in nautical miles, plus a proximity bar scaled relative to the other aircraft in the current Attention set so the nearest aircraft always has a full bar.
+Each row in Attention shows the aircraft's distance from your receiver in nautical miles, a proximity bar, and how long it has been on scope.
 
 Sort the Attention list by **Distance / Altitude / Speed / Name** with an ascending/descending toggle. Only aircraft with a live position are included.
 
@@ -74,6 +74,8 @@ Sort the Attention list by **Distance / Altitude / Speed / Name** with an ascend
 **Speed leaders** — fastest aircraft on screen with a speed bar. Click any to filter to that aircraft.
 
 **Slowest airborne** — opposite of speed leaders. Useful for spotting helicopters and light aircraft.
+
+**Vertical rate leaders** — fastest climbing and fastest descending aircraft, shown side by side.
 
 **High flyers** — top aircraft by altitude with a bar chart.
 
@@ -91,9 +93,11 @@ Sort the Attention list by **Distance / Altitude / Speed / Name** with an ascend
 
 **Countries** — registration countries of aircraft on screen.
 
+**Records** — session high-water marks: most aircraft seen, most military, furthest range, highest altitude, fastest speed. Records survive browser restarts and show the date and aircraft that set them.
+
 All sections in Summary are clickable — click a row, a bar, or a header to filter the map to that group.
 
-The controls bar has an **All aircraft / In map view** toggle so you can scope the statistics to either everything being received or just what's in the current viewport.
+The controls bar has an **All aircraft / In map view** toggle and a **Heatmap** button that overlays an aircraft density heatmap on the main tar1090 map.
 
 ---
 
@@ -173,6 +177,38 @@ Filter dropdowns let you narrow by category, campaign, and tag.
 
 ---
 
+### Ranges
+
+Filter aircraft by numeric ranges and text search. All fields are optional — only active fields are applied.
+
+**Speed** — min/max in knots.
+
+**Altitude** — min/max in feet.
+
+**Vertical rate** — min/max in feet per minute. Useful for filtering to climbing, descending, or level aircraft.
+
+**Squawk** — exact code (`7700`), range (`1200-1277`), or comma-separated list (`7700,7600,7500`). Quick-buttons for the common emergency and VFR squawks.
+
+**Age on scope** — min/max in minutes. How long the aircraft has been tracked this session.
+
+**Callsign / ICAO search** — type any string to filter to aircraft whose callsign or hex ICAO contains it. Use `*` as a wildcard.
+
+Active range filters appear as a breadcrumb chip showing a count of how many fields are set.
+
+---
+
+### Watch List
+
+A personal list of aircraft to monitor. Add any aircraft by ICAO hex and an optional label.
+
+Each row shows whether the aircraft is currently on scope (green dot), its distance from your receiver if visible, and time on scope. Click **Map filter** to hide everything except watched aircraft.
+
+Watched aircraft that appear on scope also trigger browser notifications (if notifications are enabled in Settings).
+
+Export the watch list as a CSV at any time.
+
+---
+
 ### Distance
 
 Define one or more filter zones by centre point and radius. Only aircraft within at least one zone are shown.
@@ -210,6 +246,8 @@ When a distance filter is applied, the "only in map view" restriction is automat
 - **Visible tabs** — hide any tab you don't use. Hidden tabs keep their filter state.
 - **Section visibility** — the Summary tab sections can each be toggled on/off to keep it tidy.
 - **Backup & Restore** — export all RF settings (home, distance zones, saved views, tab visibility, summary config) to a JSON file. Import it back at any time. Useful when moving to a new browser or device.
+- **Export CSV** — download a CSV of all currently filtered aircraft with ICAO, callsign, type, operator, altitude, speed, position, distance, squawk, and first-seen time.
+- **Notifications** — browser push notifications for emergency squawks (7500/7600/7700), new military aircraft, watch list hits, and aircraft appearing within a custom range. Requires browser notification permission. Each condition is independently toggleable. Alerts are rate-limited to one per aircraft per 5 minutes.
 
 ---
 

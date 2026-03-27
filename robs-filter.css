@@ -2046,3 +2046,198 @@
     white-space: nowrap;
     vertical-align: middle;
 }
+
+/* == Ranges Tab ============================================================= */
+.rf-rng-content {
+    padding: 6px 8px;
+}
+.rf-rng-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #4CAF50;
+    margin: 10px 0 4px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.rf-rng-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+}
+.rf-rng-label {
+    font-size: 11px;
+    color: #aaa;
+    min-width: 40px;
+}
+.rf-rng-pair {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+}
+.rf-rng-sep {
+    font-size: 10px;
+    color: #666;
+}
+.rf-rng-input {
+    background: #222;
+    border: 1px solid #333;
+    color: #e0e0e0;
+    border-radius: 3px;
+    padding: 4px 6px;
+    font-size: 11px;
+    width: 70px;
+}
+.rf-rng-input:focus {
+    outline: none;
+    border-color: #4CAF50;
+}
+.rf-rng-full {
+    width: 100%;
+    flex: 1;
+    box-sizing: border-box;
+}
+.rf-rng-sq-btns {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin: 4px 0 8px 0;
+}
+
+/* == Watch List Tab ========================================================= */
+.rf-wl-content {
+    padding: 6px 8px;
+}
+.rf-wl-actions {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+.rf-wl-add-row {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+.rf-wl-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.rf-wl-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    background: #1e1e1e;
+    border-radius: 3px;
+    border: 1px solid #2a2a2a;
+}
+.rf-wl-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.rf-wl-dot-on  { background: #4CAF50; }
+.rf-wl-dot-off { background: #555; }
+.rf-wl-icao {
+    font-size: 11px;
+    font-weight: 700;
+    color: #e0e0e0;
+    min-width: 60px;
+}
+.rf-wl-label-edit {
+    flex: 1;
+    min-width: 60px;
+}
+.rf-wl-dist {
+    font-size: 10px;
+    color: #888;
+    min-width: 36px;
+    text-align: right;
+}
+
+/* == Session Records ======================================================== */
+.rf-records-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 4px;
+}
+.rf-rec-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 0;
+    border-bottom: 1px solid #222;
+    flex-wrap: wrap;
+}
+.rf-rec-label {
+    font-size: 10px;
+    color: #888;
+    min-width: 80px;
+}
+.rf-rec-val {
+    font-size: 13px;
+    font-weight: 700;
+    color: #FFD700;
+}
+.rf-rec-extra {
+    font-size: 10px;
+    color: #aaa;
+    flex: 1;
+}
+.rf-rec-date {
+    font-size: 10px;
+    color: #555;
+    margin-left: auto;
+}
+
+/* == Vertical Rate Leaders ================================================== */
+.rf-vr-leaders {
+    display: flex;
+    gap: 8px;
+}
+.rf-vr-col {
+    flex: 1;
+    min-width: 0;
+}
+.rf-vr-col-title {
+    font-size: 10px;
+    font-weight: 700;
+    color: #888;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+}
+
+/* == Attention time on scope ================================================ */
+.rf-sum-attn-time {
+    font-size: 9px;
+    color: #888;
+    background: #1a1a1a;
+    border-radius: 3px;
+    padding: 1px 4px;
+    flex-shrink: 0;
+}
+
+/* == Export CSV button ====================================================== */
+.rf-export-csv-btn {
+    background: #4CAF50;
+    color: #fff;
+    border: none;
+    border-radius: 3px;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+}
+.rf-export-csv-btn:hover {
+    background: #43a047;
+}
+
+/* == Notifications section in Settings ===================================== */
+/* Uses existing .rf-set-toggle styles — no additional classes needed */

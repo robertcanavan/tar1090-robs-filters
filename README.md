@@ -12,15 +12,27 @@ Active filters appear as **breadcrumb chips** below the tab bar so you can see a
 
 ## Screenshots
 
-![Full panel overview](Screenshots/Full-Page.png)
+![Panel overview](Screenshots/panel-overview.png)
 
 | Summary | Aircraft |
 |---|---|
-| ![Summary tab](Screenshots/Screenshot%202026-03-24%20130258.png) | ![Aircraft tab](Screenshots/Screenshot%202026-03-24%20130343.png) |
+| ![Summary tab](Screenshots/tab-summary.png) | ![Aircraft tab](Screenshots/tab-aircraft.png) |
 
-| Countries | Operators |
+| Airports | Countries |
 |---|---|
-| ![Countries tab](Screenshots/Screenshot%202026-03-24%20130316.png) | ![Operators tab](Screenshots/Screenshot%202026-03-24%20130331.png) |
+| ![Airports tab](Screenshots/tab-airports.png) | ![Countries tab](Screenshots/tab-countries.png) |
+
+| Operators | Alerts |
+|---|---|
+| ![Operators tab](Screenshots/tab-operators.png) | ![Alerts tab](Screenshots/tab-alerts.png) |
+
+| Views | Distance |
+|---|---|
+| ![Views tab](Screenshots/tab-views.png) | ![Distance tab](Screenshots/tab-distance.png) |
+
+| Ranges | Settings |
+|---|---|
+| ![Ranges tab](Screenshots/tab-ranges.png) | ![Settings tab](Screenshots/tab-settings.png) |
 
 ---
 

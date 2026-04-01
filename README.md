@@ -1,10 +1,12 @@
-# Robs Filters for tar1090
+# Robs Filters for tar1090 — v2.0.0-beta
 
 A multi-tab filter and dashboard panel for [tar1090](https://github.com/wiedehopf/tar1090). Click the **RF** button in the tar1090 header to open a sidebar packed with live filtering, statistics, and tracking tools.
 
 Filters AND across tabs — a plane has to pass every active tab to stay on the map. Within a tab, multiple selected items are OR-ed.
 
 Active filters appear as **breadcrumb chips** below the tab bar so you can see at a glance what is applied, jump back to a tab by clicking the chip, or clear it with the X. When a saved View is active it also appears as a chip showing the view name and map mode, with a one-click Turn Off button.
+
+> **v2.0.0-beta** is a complete rewrite. All localStorage keys are preserved and migrated automatically from v1. New features: built-in preset views, aircraft photo toasts via planespotters.net, full watchlist with dormant entries and export, complete notifications system.
 
 ---
 
@@ -142,6 +144,33 @@ Military detection uses three methods in order:
 
 Save your current filter state as a named preset and recall it in one click.
 
+**Built-in views** — a library of ready-made presets is always available without any setup:
+
+| View | What it shows |
+|---|---|
+| All Military | All aircraft flagged as military |
+| All Helicopters | Rotary-wing aircraft (category filter) |
+| High Altitude (FL250+) | Aircraft above 25,000 ft |
+| Fast (300kt+) | Aircraft above 300 knots |
+| Low & Slow | Below 3,000 ft and under 150 knots |
+| Business Jets | Business jet category |
+| Turboprops | Turboprop category |
+| Heavy Airliners | Heavy airliner category |
+| Strong Climbs (1500fpm+) | Aircraft climbing hard |
+| Strong Descents (-1500fpm) | Aircraft descending hard |
+| Alerts: Military | plane-alert-db military entries |
+| Alerts: Government | Government aircraft from alert DB |
+| Alerts: Historic | Historic / warbird aircraft |
+| Alerts: Interesting | Notable aircraft from alert DB |
+| Alerts: Law Enforcement | Police and enforcement aircraft |
+| Alerts Tag: Red Arrows | RAF Red Arrows |
+| Alerts Tag: Warbird | Warbirds |
+| Alerts Tag: BBMF | Battle of Britain Memorial Flight |
+| Alerts Tag: RAF | Royal Air Force aircraft |
+| Alerts Tag: Police | Police aviation |
+| Alerts Tag: Air Ambulance | Air ambulance aircraft |
+| Alerts Tag: Coastguard | Coastguard aircraft |
+
 **Saving a view** — set up any combination of filters across any tabs, then click **Save current as new view**. The view captures all active tab filters, the distance zones, and your panel scope.
 
 **Applying a view** — click **Apply** on a view row to replace your current filters with that view's saved state. The active view appears as a chip in the breadcrumb bar showing the name and map mode.
@@ -203,9 +232,15 @@ A personal list of aircraft to monitor. Add any aircraft by ICAO hex and an opti
 
 Each row shows whether the aircraft is currently on scope (green dot), its distance from your receiver if visible, and time on scope. Click **Map filter** to hide everything except watched aircraft.
 
-Watched aircraft that appear on scope also trigger browser notifications (if notifications are enabled in Settings).
+**Dormant entries** — add an aircraft before it has been seen. It will activate automatically when it first appears on scope and trigger a notification.
 
-Export the watch list as a CSV at any time.
+**Search** — unified live search across both aircraft on scope and the plane-alert database. Results are grouped as Live and Alert DB with per-row Add / Add+MapFilter / Add+Notify actions.
+
+**Export** — download the full watch list as CSV or JSON at any time.
+
+**Undo** — removing an entry shows an Undo button for the current session.
+
+Watched aircraft that appear on scope also trigger browser notifications (if enabled in Settings).
 
 ---
 
@@ -247,7 +282,7 @@ When a distance filter is applied, the "only in map view" restriction is automat
 - **Section visibility** — the Summary tab sections can each be toggled on/off to keep it tidy.
 - **Backup & Restore** — export all RF settings (home, distance zones, saved views, tab visibility, summary config) to a JSON file. Import it back at any time. Useful when moving to a new browser or device.
 - **Export CSV** — download a CSV of all currently filtered aircraft with ICAO, callsign, type, operator, altitude, speed, position, distance, squawk, and first-seen time.
-- **Notifications** — browser push notifications for emergency squawks (7500/7600/7700), new military aircraft, watch list hits, and aircraft appearing within a custom range. Requires browser notification permission. Each condition is independently toggleable. Alerts are rate-limited to one per aircraft per 5 minutes.
+- **Notifications** — browser push notifications for emergency squawks (7500/7600/7700), new military aircraft, watch list hits, aircraft in range, and alert DB matches. Each condition is independently toggleable. Alerts are rate-limited per aircraft. Notifications include a live aircraft photo from planespotters.net when available.
 
 ---
 
